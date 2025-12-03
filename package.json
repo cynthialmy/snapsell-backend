@@ -1,0 +1,28 @@
+{
+  "name": "snapsell-backend",
+  "version": "1.0.0",
+  "description": "SnapSell backend with Supabase - Authentication, Listings, Sharing, Feedback, and Freemium",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "migrate": "supabase db push",
+    "migrate:reset": "supabase db reset",
+    "functions:deploy": "supabase functions deploy",
+    "functions:serve": "supabase functions serve",
+    "start": "supabase start",
+    "stop": "supabase stop"
+  },
+  "keywords": [
+    "supabase",
+    "backend",
+    "postgresql",
+    "edge-functions",
+    "stripe",
+    "freemium"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.39.0"
+  },
+  "dependencies": {}
+}

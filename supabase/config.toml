@@ -1,0 +1,43 @@
+# Supabase Configuration File
+# This file configures your local Supabase instance
+
+[project]
+name = "snapsell-backend"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+smtp_port = 54325
+pop3_port = 54326
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[storage.buckets.items]
+public = false
+file_size_limit = "10MiB"
+allowed_mime_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+
+[edge_runtime]
+enabled = true
+port = 54327
+
+[analytics]
+enabled = false
