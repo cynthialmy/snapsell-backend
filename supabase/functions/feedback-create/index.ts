@@ -24,7 +24,7 @@ serve(async (req) => {
 
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+      Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? "",
       authHeader
         ? {
             global: {
@@ -72,7 +72,7 @@ serve(async (req) => {
     if (body.attachment && body.attachment_filename) {
       const supabaseAdmin = createClient(
         Deno.env.get("SUPABASE_URL") ?? "",
-        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+        Deno.env.get("SUPABASE_SECRET_KEY") ?? ""
       );
 
       const folder = userId ? `feedback/${userId}` : "feedback/anonymous";

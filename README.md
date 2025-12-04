@@ -74,8 +74,8 @@ cp .env.example .env
 
 Required variables:
 - `SUPABASE_URL` - Your Supabase project URL
-- `SUPABASE_ANON_KEY` - Supabase anonymous key
-- `SUPABASE_SERVICE_ROLE_KEY` - Supabase service role key (for admin operations)
+- `SUPABASE_PUBLISHABLE_KEY` - Supabase publishable key
+- `SUPABASE_SECRET_KEY` - Supabase secret key (for admin operations)
 - `STRIPE_SECRET_KEY` - Stripe secret key
 - `STRIPE_WEBHOOK_SECRET` - Stripe webhook signing secret
 - `FREE_LISTING_LIMIT` - Free tier listing limit (default: 10)
@@ -300,7 +300,7 @@ All tables have RLS enabled with policies ensuring:
 - Users can only access their own data
 - Public/shared listings are readable via share_slug
 - Anonymous feedback is allowed
-- Service role can perform admin operations
+- Secret key can perform admin operations (bypasses RLS)
 
 ### Storage Policies
 

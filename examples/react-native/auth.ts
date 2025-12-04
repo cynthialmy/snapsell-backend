@@ -5,16 +5,16 @@
  *
  * Prerequisites:
  * - Install: npm install @supabase/supabase-js expo-secure-store
- * - Set up Supabase client with your project URL and anon key
+ * - Set up Supabase client with your project URL and publishable key
  */
 
 import { createClient } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
 
 // Initialize Supabase client
-// Replace with your Supabase project URL and anon key
+// Replace with your Supabase project URL and publishable key
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 'YOUR_SUPABASE_PUBLISHABLE_KEY';
 
 // Custom storage adapter for Expo SecureStore
 const ExpoSecureStoreAdapter = {
@@ -29,7 +29,7 @@ const ExpoSecureStoreAdapter = {
   },
 };
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
     storage: ExpoSecureStoreAdapter,
     autoRefreshToken: true,
