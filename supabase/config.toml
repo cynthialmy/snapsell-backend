@@ -1,9 +1,6 @@
 # Supabase Configuration File
 # This file configures your local Supabase instance
 
-[project]
-name = "snapsell-backend"
-
 [api]
 enabled = true
 port = 54321
@@ -14,7 +11,7 @@ max_rows = 1000
 [db]
 port = 54322
 shadow_port = 54320
-major_version = 15
+major_version = 17
 
 [studio]
 enabled = true
@@ -37,7 +34,6 @@ allowed_mime_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
 
 [edge_runtime]
 enabled = true
-port = 54327
 
 [analytics]
 enabled = false

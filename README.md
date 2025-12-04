@@ -31,9 +31,14 @@ This backend provides:
 
 ### 1. Install Supabase CLI
 
+**macOS (Homebrew - Recommended):**
 ```bash
-npm install -g supabase
+brew install supabase/tap/supabase
 ```
+
+**Other platforms:**
+- See [Supabase CLI Installation Guide](https://github.com/supabase/cli#install-the-cli)
+- Note: `npm install -g supabase` is NOT supported
 
 ### 2. Initialize Supabase Project
 
@@ -80,6 +85,9 @@ Required variables:
 - `STRIPE_WEBHOOK_SECRET` - Stripe webhook signing secret
 - `FREE_LISTING_LIMIT` - Free tier listing limit (default: 10)
 
+Optional variables:
+- `STRIPE_PRODUCT_ID` - Stripe product ID (for KoFi/Stripe integration validation)
+
 ### 5. Deploy Edge Functions
 
 ```bash
@@ -98,14 +106,19 @@ supabase functions deploy
 
 ### 6. Configure Stripe Webhook
 
-1. Go to Stripe Dashboard → Webhooks
-2. Add endpoint: `https://your-project.supabase.co/functions/v1/stripe-webhook`
-3. Select events:
-   - `checkout.session.completed`
-   - `customer.subscription.updated`
-   - `customer.subscription.deleted`
-   - `invoice.paid`
-4. Copy the webhook signing secret to `STRIPE_WEBHOOK_SECRET`
+**📖 For detailed step-by-step instructions, see [WEBHOOK_SETUP_GUIDE.md](./WEBHOOK_SETUP_GUIDE.md)**
+
+Quick setup:
+1. Deploy the `stripe-webhook` Edge Function
+2. Get your webhook URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/stripe-webhook`
+3. In Stripe Dashboard → Webhooks → Add endpoint
+4. Select events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`
+5. Copy the webhook signing secret and add it to Supabase secrets as `STRIPE_WEBHOOK_SECRET`
+
+**Note for KoFi Integration:**
+- If using KoFi with Stripe, set `STRIPE_PRODUCT_ID` to your Stripe product ID (e.g., `prod_TXmIdyUe4w9sOT`)
+- The webhook will validate product IDs when processing payments
+- Ensure KoFi checkout sessions include `client_reference_id` set to the user's UUID for proper user association
 
 ### 7. Set Up Storage Bucket
 

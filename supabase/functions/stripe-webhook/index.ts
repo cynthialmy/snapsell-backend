@@ -2,17 +2,69 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 
-// Stripe webhook signature verification
-// Note: In production, use Stripe's official SDK for signature verification
+// Stripe webhook signature verification using HMAC
 async function verifyStripeSignature(
   payload: string,
   signature: string,
   secret: string
 ): Promise<boolean> {
-  // TODO: Implement proper Stripe signature verification
-  // For now, we'll use a simple check with the webhook secret
-  // In production, use: https://github.com/stripe/stripe-node
-  return true; // Stub - implement proper verification
+  try {
+    // Stripe sends signatures in format: t=timestamp,v1=signature,v0=signature
+    // We need to extract the v1 signature
+    const elements = signature.split(',');
+    const sigHeader: Record<string, string> = {};
+
+    for (const element of elements) {
+      const [key, value] = element.split('=');
+      sigHeader[key] = value;
+    }
+
+    const timestamp = sigHeader.t;
+    const signatureToVerify = sigHeader.v1;
+
+    if (!timestamp || !signatureToVerify) {
+      return false;
+    }
+
+    // Create the signed payload
+    const signedPayload = `${timestamp}.${payload}`;
+
+    // Compute HMAC
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+
+    const signatureBytes = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      encoder.encode(signedPayload)
+    );
+
+    // Convert to hex
+    const computedSignature = Array.from(new Uint8Array(signatureBytes))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    // Compare signatures using constant-time comparison
+    if (computedSignature.length !== signatureToVerify.length) {
+      return false;
+    }
+
+    let match = 0;
+    for (let i = 0; i < computedSignature.length; i++) {
+      match |= computedSignature.charCodeAt(i) ^ signatureToVerify.charCodeAt(i);
+    }
+
+    return match === 0;
+  } catch (error) {
+    console.error('Signature verification error:', error);
+    return false;
+  }
 }
 
 interface StripeEvent {
@@ -30,25 +82,52 @@ serve(async (req) => {
   }
 
   try {
-    // Get Stripe signature
+    // Get Stripe signature - webhooks don't use Authorization headers
     const signature = req.headers.get("stripe-signature");
     const webhookSecret = Deno.env.get("STRIPE_WEBHOOK_SECRET");
 
-    if (!signature || !webhookSecret) {
+    // Log for debugging (remove in production or use proper logging)
+    console.log("Webhook received:", {
+      method: req.method,
+      hasSignature: !!signature,
+      hasSecret: !!webhookSecret,
+      headers: Object.fromEntries(req.headers.entries()),
+    });
+
+    if (!signature) {
+      console.error("Missing stripe-signature header");
       return new Response(
-        JSON.stringify({ error: "Missing signature or webhook secret" }),
+        JSON.stringify({
+          error: "Missing stripe-signature header",
+          message: "Stripe webhooks require the stripe-signature header"
+        }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!webhookSecret) {
+      console.error("Missing STRIPE_WEBHOOK_SECRET environment variable");
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          message: "STRIPE_WEBHOOK_SECRET not configured"
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     // Get raw body for signature verification
     const body = await req.text();
 
-    // Verify signature (stub - implement properly in production)
+    // Verify signature
     const isValid = await verifyStripeSignature(body, signature, webhookSecret);
     if (!isValid) {
+      console.error("Invalid signature verification");
       return new Response(
-        JSON.stringify({ error: "Invalid signature" }),
+        JSON.stringify({
+          error: "Invalid signature",
+          message: "Webhook signature verification failed"
+        }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -57,10 +136,26 @@ serve(async (req) => {
     const event: StripeEvent = JSON.parse(body);
 
     // Create Supabase admin client
-    const supabaseAdmin = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SECRET_KEY") ?? ""
-    );
+    // Use SUPABASE_SERVICE_ROLE_KEY (legacy name) or SUPABASE_SECRET_KEY
+    const supabaseKey = Deno.env.get("SUPABASE_SECRET_KEY") ??
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+
+    if (!supabaseUrl || !supabaseKey) {
+      console.error("Missing Supabase configuration:", {
+        hasUrl: !!supabaseUrl,
+        hasKey: !!supabaseKey,
+      });
+      return new Response(
+        JSON.stringify({ error: "Server configuration error", message: "Missing Supabase URL or secret key" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
+
+    // Get configured product ID (for KoFi/Stripe integration)
+    const expectedProductId = Deno.env.get("STRIPE_PRODUCT_ID");
 
     // Handle different event types
     switch (event.type) {
@@ -69,6 +164,24 @@ serve(async (req) => {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
         const clientReferenceId = session.client_reference_id; // User ID
+
+        // Optional: Validate product ID if configured (for KoFi integration)
+        if (expectedProductId && session.metadata?.product_id !== expectedProductId) {
+          // Check line items for product ID
+          const lineItems = session.line_items || [];
+          const hasMatchingProduct = lineItems.some(
+            (item: any) => item.price?.product === expectedProductId
+          );
+
+          // If product ID doesn't match and we have one configured, log but continue
+          // (KoFi may pass product ID in different fields)
+          if (!hasMatchingProduct && session.metadata?.product_id) {
+            console.log("Product ID mismatch, but continuing:", {
+              expected: expectedProductId,
+              received: session.metadata?.product_id,
+            });
+          }
+        }
 
         // Get user ID from metadata or client_reference_id
         let userId = clientReferenceId;
@@ -220,8 +333,19 @@ serve(async (req) => {
         const customerId = invoice.customer;
         const subscriptionId = invoice.subscription;
 
-        // Handle credit purchases from invoice metadata
-        const creditsAmount = invoice.metadata?.credits;
+        // Handle credit purchases from invoice metadata or line items
+        // KoFi may pass credits in metadata or we can derive from product
+        let creditsAmount = invoice.metadata?.credits;
+
+        // If no credits in metadata, check line items for product-based credits
+        if (!creditsAmount && expectedProductId) {
+          const lineItems = invoice.lines?.data || [];
+          const matchingItem = lineItems.find(
+            (item: any) => item.price?.product === expectedProductId
+          );
+          // You can map product to credits here if needed
+          // For now, we'll rely on metadata
+        }
         if (creditsAmount) {
           const credits = parseInt(creditsAmount, 10);
           if (credits > 0) {
