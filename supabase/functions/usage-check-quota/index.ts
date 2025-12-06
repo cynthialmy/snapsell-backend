@@ -26,10 +26,20 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
     if (!supabaseUrl || !supabaseServiceRoleKey || !supabaseAnonKey) {
+      console.error("Missing Supabase environment variables:", {
+        hasUrl: !!supabaseUrl,
+        hasServiceRoleKey: !!supabaseServiceRoleKey,
+        hasAnonKey: !!supabaseAnonKey,
+      });
       return new Response(
         JSON.stringify({
           error: "Server configuration error",
-          details: "Supabase environment variables are not available."
+          details: "Supabase environment variables are not available. This should not happen in Edge Functions.",
+          debug: {
+            hasUrl: !!supabaseUrl,
+            hasServiceRoleKey: !!supabaseServiceRoleKey,
+            hasAnonKey: !!supabaseAnonKey,
+          }
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -82,8 +92,18 @@ serve(async (req) => {
 
     if (quotaError) {
       console.error("Quota check error:", quotaError);
+      console.error("Error details:", {
+        code: quotaError.code,
+        message: quotaError.message,
+        details: quotaError.details,
+        hint: quotaError.hint,
+      });
       return new Response(
-        JSON.stringify({ error: "Failed to check quota", details: quotaError.message }),
+        JSON.stringify({
+          error: "Failed to check quota",
+          details: quotaError.message,
+          hint: quotaError.hint || "The check_free_quota database function may not exist. Run migrations: supabase db push"
+        }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }

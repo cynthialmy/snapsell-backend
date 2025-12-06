@@ -503,6 +503,62 @@ curl -X POST http://localhost:54321/functions/v1/upload \
 
 ## Troubleshooting
 
+### Edge Function Deployment Issues
+
+**Symptoms:**
+- `/upload` returns non-200 status or "Failed to upload file"
+- `/usage-check-quota` returns 500 "Internal server error"
+- Functions appear to not be deployed
+
+**Quick Diagnostic:**
+```bash
+# Run the diagnostic script
+./tools/diagnose-edge-functions.sh
+
+# Or manually check
+supabase functions list
+supabase functions logs upload
+supabase functions logs usage-check-quota
+```
+
+**Common Fixes:**
+
+1. **Functions Not Deployed:**
+   ```bash
+   # Deploy the functions
+   supabase functions deploy upload
+   supabase functions deploy usage-check-quota
+
+   # Or use the fix script
+   ./tools/fix-edge-functions.sh
+   ```
+
+2. **Missing Database Function (`check_free_quota`):**
+   ```bash
+   # Apply migrations
+   supabase db push
+   ```
+   The `check_free_quota` function is created by migration `20240101000002_functions_and_triggers.sql`.
+
+3. **Missing Storage Bucket (`items`):**
+   - Go to Supabase Dashboard → Storage
+   - Create bucket named `items` if it doesn't exist
+   - Set it to **private** (not public)
+   - Configure:
+     - File size limit: 10MB
+     - Allowed MIME types: `image/jpeg`, `image/jpg`, `image/png`, `image/webp`
+
+4. **Environment Variables:**
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` are **automatically provided** - no manual setup needed
+   - Only set `FREE_LISTING_LIMIT` if you want a custom limit (defaults to 10)
+   - Set via: `supabase secrets set FREE_LISTING_LIMIT=10`
+
+**Error Messages:**
+- "Server configuration error" → Function not deployed or Supabase project issue
+- "Failed to check quota" → Database function `check_free_quota` missing (run migrations)
+- "Failed to upload file" → Storage bucket `items` missing or misconfigured
+- "Bucket not found" → Create `items` bucket in Storage
+
 ### Migration Errors
 
 If migrations fail:

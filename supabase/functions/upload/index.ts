@@ -32,10 +32,18 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
     if (!supabaseUrl || !supabaseAnonKey) {
+      console.error("Missing Supabase environment variables:", {
+        hasUrl: !!supabaseUrl,
+        hasAnonKey: !!supabaseAnonKey,
+      });
       return new Response(
         JSON.stringify({
           error: "Server configuration error",
-          details: "Supabase environment variables are not available."
+          details: "Supabase environment variables are not available. This should not happen in Edge Functions.",
+          debug: {
+            hasUrl: !!supabaseUrl,
+            hasAnonKey: !!supabaseAnonKey,
+          }
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -93,8 +101,16 @@ serve(async (req) => {
 
       if (uploadError) {
         console.error("Upload error:", uploadError);
+        console.error("Error details:", {
+          message: uploadError.message,
+          statusCode: uploadError.statusCode,
+        });
         return new Response(
-          JSON.stringify({ error: "Failed to upload file", details: uploadError.message }),
+          JSON.stringify({
+            error: "Failed to upload file",
+            details: uploadError.message,
+            hint: uploadError.message?.includes("Bucket") ? "The 'items' storage bucket may not exist. Create it in Supabase Dashboard → Storage" : undefined
+          }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
