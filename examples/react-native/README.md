@@ -2,23 +2,42 @@
 
 This directory contains example code for integrating SnapSell backend with your Expo React Native app.
 
-## Setup
+## Quick Start
 
-1. Install required dependencies:
+**📖 For detailed setup instructions, see [SETUP.md](./SETUP.md)**
+
+1. **Install required dependencies:**
 
 ```bash
 npm install @supabase/supabase-js expo-secure-store expo-file-system expo-image-picker
 ```
 
-2. Set up environment variables in your `.env` file:
+2. **Set up environment variables:**
 
-```
-EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
+Create a `.env` file in your project root:
+
+```env
+EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
-EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL=your_supabase_functions_url
+EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL=https://your-project.supabase.co/functions/v1
 ```
 
-3. Copy the example files to your React Native project and import as needed.
+**Note:** `EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL` is optional - it will default to `${EXPO_PUBLIC_SUPABASE_URL}/functions/v1` if not set.
+
+3. **Copy the example files to your React Native project:**
+
+```bash
+# Copy to your utils or lib directory
+cp examples/react-native/auth.ts src/utils/
+cp examples/react-native/listings.ts src/utils/
+```
+
+4. **Import and use:**
+
+```typescript
+import { signIn, getUser } from './utils/auth';
+import { createListingFromImage, checkQuota } from './utils/listings';
+```
 
 ## Usage Examples
 
@@ -151,6 +170,67 @@ const subscription = onAuthStateChange((user) => {
 // subscription.data.subscription.unsubscribe();
 ```
 
+## Migrating Local Listings to Backend
+
+If you have local listings stored in AsyncStorage or local state, use the migration helper:
+
+```typescript
+import { migrateLocalListingsToBackend } from './listings';
+
+// Your local listings structure
+const localListings = [
+  {
+    id: 'local-1',
+    title: 'Vintage Chair',
+    description: 'Beautiful vintage chair',
+    price_cents: 7500,
+    imageBase64: 'data:image/jpeg;base64,...', // or imageUri: 'file://...'
+    // ... other fields
+  },
+  // ... more listings
+];
+
+// Migrate with progress tracking
+const result = await migrateLocalListingsToBackend(
+  localListings,
+  (progress) => {
+    console.log(`Migrating ${progress.current}/${progress.total}: ${progress.listingId}`);
+  }
+);
+
+console.log(`Migration complete: ${result.migrated} migrated, ${result.failed} failed`);
+if (result.errors.length > 0) {
+  console.error('Errors:', result.errors);
+}
+```
+
+The migration function will:
+1. Upload images to Supabase Storage (if not already uploaded)
+2. Create listings on the backend
+3. Handle quota checks automatically
+4. Return detailed results with any errors
+
+## Type Definitions
+
+All functions return consistent error formats:
+
+```typescript
+// Success
+{ listing: {...}, error: null }
+{ data: {...}, error: null }
+
+// Error
+{ listing: null, error: { message: string, code?: string, details?: string } }
+{ data: null, error: Error }
+```
+
+## Error Codes
+
+- `QUOTA_EXCEEDED` - User has reached their listing limit
+- `UNAUTHORIZED` - User is not authenticated
+- `VALIDATION_ERROR` - Invalid request data
+- `INTERNAL_ERROR` - Server error
+
 ## Notes
 
 - All Edge Functions require authentication except `listings-get-by-slug` (public share links)
@@ -158,3 +238,4 @@ const subscription = onAuthStateChange((user) => {
 - Free tier allows 10 listings per 30-day rolling window (configurable)
 - Quota checks happen automatically when creating listings
 - Share slugs are generated automatically for listings with visibility 'shared' or 'public'
+- `description` and `price_cents` are optional fields (useful for migrations)

@@ -4,8 +4,8 @@ import { corsHeaders } from "../_shared/cors.ts";
 
 interface CreateListingRequest {
   title: string;
-  description: string;
-  price_cents: number;
+  description?: string; // Made optional for migration compatibility
+  price_cents?: number; // Made optional for migration compatibility
   currency?: string;
   condition?: string;
   category?: string;
@@ -25,6 +25,32 @@ serve(async (req) => {
   }
 
   try {
+    // Validate environment variables
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseSecretKey = Deno.env.get("SUPABASE_SECRET_KEY");
+    const supabasePublishableKey = Deno.env.get("SUPABASE_PUBLISHABLE_KEY");
+
+    if (!supabaseUrl || !supabaseSecretKey || !supabasePublishableKey) {
+      const missing = [];
+      if (!supabaseUrl) missing.push("SUPABASE_URL");
+      if (!supabaseSecretKey) missing.push("SUPABASE_SECRET_KEY");
+      if (!supabasePublishableKey) missing.push("SUPABASE_PUBLISHABLE_KEY");
+
+      console.error("Missing environment variables:", {
+        hasUrl: !!supabaseUrl,
+        hasSecretKey: !!supabaseSecretKey,
+        hasPublishableKey: !!supabasePublishableKey,
+        missing,
+      });
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          details: `Missing required environment variables: ${missing.join(", ")}. Please set these in Supabase Dashboard → Project Settings → Edge Functions → Secrets.`
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Get authorization header
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
@@ -35,20 +61,13 @@ serve(async (req) => {
     }
 
     // Create Supabase client with secret key for admin operations
-    const supabaseAdmin = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SECRET_KEY") ?? ""
-    );
+    const supabaseAdmin = createClient(supabaseUrl, supabaseSecretKey);
 
-    const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? "",
-      {
-        global: {
-          headers: { Authorization: authHeader },
-        },
-      }
-    );
+    const supabaseClient = createClient(supabaseUrl, supabasePublishableKey, {
+      global: {
+        headers: { Authorization: authHeader },
+      },
+    });
 
     // Get authenticated user
     const {
@@ -64,12 +83,54 @@ serve(async (req) => {
     }
 
     // Parse request body
-    const body: CreateListingRequest = await req.json();
+    let body: CreateListingRequest;
+    try {
+      body = await req.json();
+    } catch (parseError) {
+      console.error("JSON parse error:", parseError);
+      return new Response(
+        JSON.stringify({
+          error: "Invalid JSON in request body",
+          details: parseError instanceof Error ? parseError.message : String(parseError)
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Validate required fields
     if (!body.title || !body.storage_path) {
       return new Response(
-        JSON.stringify({ error: "title and storage_path are required" }),
+        JSON.stringify({
+          error: "title and storage_path are required",
+          received: {
+            hasTitle: !!body.title,
+            hasStoragePath: !!body.storage_path,
+            bodyKeys: Object.keys(body)
+          }
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate data types
+    if (body.price_cents !== undefined && typeof body.price_cents !== 'number') {
+      return new Response(
+        JSON.stringify({
+          error: "price_cents must be a number",
+          received: typeof body.price_cents,
+          value: body.price_cents
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (body.tags !== undefined && !Array.isArray(body.tags)) {
+      return new Response(
+        JSON.stringify({
+          error: "tags must be an array",
+          received: typeof body.tags,
+          value: body.tags
+        }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -150,31 +211,58 @@ serve(async (req) => {
       share_slug = slugData;
     }
 
+    // Prepare listing data with proper null handling
+    const listingData: any = {
+      user_id: user.id,
+      title: body.title,
+      storage_path: body.storage_path,
+      currency: body.currency || "USD",
+      visibility: body.visibility || "private",
+    };
+
+    // Only include optional fields if they are provided
+    if (body.description !== undefined && body.description !== null) {
+      listingData.description = body.description;
+    }
+    if (body.price_cents !== undefined && body.price_cents !== null) {
+      listingData.price_cents = body.price_cents;
+    }
+    if (body.condition !== undefined && body.condition !== null) {
+      listingData.condition = body.condition;
+    }
+    if (body.category !== undefined && body.category !== null) {
+      listingData.category = body.category;
+    }
+    if (body.tags !== undefined && body.tags !== null) {
+      listingData.tags = Array.isArray(body.tags) ? body.tags : [];
+    }
+    if (body.thumbnail_path !== undefined && body.thumbnail_path !== null) {
+      listingData.thumbnail_path = body.thumbnail_path;
+    }
+    if (body.ai_generated !== undefined && body.ai_generated !== null) {
+      listingData.ai_generated = body.ai_generated;
+    }
+    if (share_slug !== null) {
+      listingData.share_slug = share_slug;
+    }
+
     // Create listing
     const { data: listing, error: listingError } = await supabaseClient
       .from("listings")
-      .insert({
-        user_id: user.id,
-        title: body.title,
-        description: body.description,
-        price_cents: body.price_cents,
-        currency: body.currency || "USD",
-        condition: body.condition,
-        category: body.category,
-        tags: body.tags || [],
-        storage_path: body.storage_path,
-        thumbnail_path: body.thumbnail_path,
-        ai_generated: body.ai_generated,
-        visibility: body.visibility || "private",
-        share_slug,
-      })
+      .insert(listingData)
       .select()
       .single();
 
     if (listingError) {
       console.error("Listing creation error:", listingError);
+      console.error("Listing data attempted:", JSON.stringify(listingData, null, 2));
       return new Response(
-        JSON.stringify({ error: "Failed to create listing", details: listingError.message }),
+        JSON.stringify({
+          error: "Failed to create listing",
+          details: listingError.message,
+          code: listingError.code,
+          hint: listingError.hint
+        }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -198,9 +286,14 @@ serve(async (req) => {
       { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Unhandled error:", error);
+    console.error("Error stack:", error instanceof Error ? error.stack : "No stack trace");
     return new Response(
-      JSON.stringify({ error: "Internal server error", details: error.message }),
+      JSON.stringify({
+        error: "Internal server error",
+        details: error instanceof Error ? error.message : String(error),
+        type: error instanceof Error ? error.constructor.name : typeof error
+      }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

@@ -7,15 +7,29 @@
  * Prerequisites:
  * - Supabase client initialized (see auth.ts)
  * - Edge Functions deployed to your Supabase project
+ *
+ * Note: This is an example file. Copy it to your React Native project and install
+ * the required dependencies. TypeScript errors about missing modules are expected
+ * until you install the packages in your project.
  */
 
 import { supabase } from './auth';
+// @ts-ignore - Install expo-file-system in your project
 import * as FileSystem from 'expo-file-system';
+// @ts-ignore - Install expo-image-picker in your project
 import * as ImagePicker from 'expo-image-picker';
 
 // Edge Function base URL
+// If EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL is not set, it will default to the standard Supabase functions URL
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const EDGE_FUNCTION_BASE = process.env.EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL ||
-  `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1`;
+  (SUPABASE_URL ? `${SUPABASE_URL}/functions/v1` : null);
+
+if (!EDGE_FUNCTION_BASE) {
+  throw new Error(
+    'Missing Supabase configuration. Please set EXPO_PUBLIC_SUPABASE_URL or EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL in your environment variables.'
+  );
+}
 
 // ============================================
 // Image Upload
@@ -76,15 +90,15 @@ export async function uploadImage(base64Image: string, contentType: string = 'im
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Upload failed');
+      const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(errorData.error || `Upload failed with status ${response.status}`);
     }
 
     const data = await response.json();
     return { data, error: null };
   } catch (error: any) {
     console.error('Upload error:', error);
-    return { data: null, error };
+    return { data: null, error: error instanceof Error ? error : new Error(String(error)) };
   }
 }
 
@@ -129,8 +143,8 @@ export async function generateListingContent(storagePath: string) {
 
 interface CreateListingParams {
   title: string;
-  description: string;
-  price_cents: number;
+  description?: string; // Optional for migration compatibility
+  price_cents?: number; // Optional for migration compatibility
   currency?: string;
   condition?: string;
   category?: string;
@@ -174,7 +188,20 @@ export async function createListing(params: CreateListingParams) {
           },
         };
       }
-      throw new Error(data.error || 'Failed to create listing');
+
+      // Return detailed error information
+      const errorMessage = data.error || 'Failed to create listing';
+      const errorDetails = data.details || data.message || '';
+
+      return {
+        listing: null,
+        error: {
+          message: errorMessage,
+          details: errorDetails,
+          code: data.code,
+          ...data,
+        },
+      };
     }
 
     return { listing: data.listing, quota: data.quota, error: null };
@@ -310,11 +337,11 @@ export async function createListingFromImage(
     // Step 3: Create listing
     const { listing, error: createError } = await createListing({
       title: genData.title,
-      description: genData.description,
-      price_cents: genData.price_cents,
+      description: genData.description || undefined,
+      price_cents: genData.price_cents || undefined,
       currency: genData.currency || 'USD',
-      condition: genData.condition,
-      category: genData.category,
+      condition: genData.condition || undefined,
+      category: genData.category || undefined,
       tags: genData.tags || [],
       storage_path: uploadData.storage_path,
       ai_generated: genData.ai_generated,
@@ -405,4 +432,139 @@ export async function submitFeedback(params: {
     console.error('Submit feedback error:', error);
     return { feedback: null, error };
   }
+}
+
+// ============================================
+// Migration Helpers
+// ============================================
+
+/**
+ * Local listing structure (from AsyncStorage or local state)
+ */
+interface LocalListing {
+  id: string;
+  title: string;
+  description?: string;
+  price_cents?: number;
+  currency?: string;
+  condition?: string;
+  category?: string;
+  tags?: string[];
+  imageUri?: string; // Local file URI
+  imageBase64?: string; // Base64 encoded image
+  storage_path?: string; // Already uploaded storage path
+  thumbnail_path?: string;
+  ai_generated?: any;
+  visibility?: 'private' | 'shared' | 'public';
+  created_at?: string;
+}
+
+/**
+ * Migrate local listings to backend
+ * Uploads images if needed, then creates listings on backend
+ */
+export async function migrateLocalListingsToBackend(
+  localListings: LocalListing[],
+  onProgress?: (progress: { current: number; total: number; listingId: string }) => void
+): Promise<{
+  migrated: number;
+  failed: number;
+  errors: Array<{ listingId: string; error: any }>;
+}> {
+  const results = {
+    migrated: 0,
+    failed: 0,
+    errors: [] as Array<{ listingId: string; error: any }>,
+  };
+
+  for (let i = 0; i < localListings.length; i++) {
+    const localListing = localListings[i];
+
+    if (onProgress) {
+      onProgress({
+        current: i + 1,
+        total: localListings.length,
+        listingId: localListing.id,
+      });
+    }
+
+    try {
+      let storagePath = localListing.storage_path;
+      let thumbnailPath = localListing.thumbnail_path;
+
+      // If no storage_path, upload image first
+      if (!storagePath && (localListing.imageBase64 || localListing.imageUri)) {
+        let imageBase64 = localListing.imageBase64;
+
+        // If we have a local URI, read it as base64
+        if (!imageBase64 && localListing.imageUri) {
+          try {
+            // For React Native, use expo-file-system to read local files
+            // This requires expo-file-system to be installed
+            // @ts-ignore - FileSystem is available when expo-file-system is installed
+            const fileInfo = await FileSystem.getInfoAsync(localListing.imageUri);
+            if (fileInfo.exists) {
+              // @ts-ignore - expo-file-system uses string encoding, not enum
+              const base64 = await FileSystem.readAsStringAsync(
+                localListing.imageUri,
+                { encoding: 'base64' }
+              );
+              imageBase64 = `data:image/jpeg;base64,${base64}`;
+            }
+          } catch (readError) {
+            console.error(`Failed to read image for listing ${localListing.id}:`, readError);
+            results.failed++;
+            results.errors.push({
+              listingId: localListing.id,
+              error: new Error(`Failed to read image: ${readError}`),
+            });
+            continue;
+          }
+        }
+
+        if (imageBase64) {
+          // Upload image
+          const { data: uploadData, error: uploadError } = await uploadImage(imageBase64);
+          if (uploadError || !uploadData) {
+            throw new Error(`Upload failed: ${uploadError?.message || 'Unknown error'}`);
+          }
+          storagePath = uploadData.storage_path;
+        }
+      }
+
+      if (!storagePath) {
+        throw new Error('No image available to upload');
+      }
+
+      // Create listing on backend
+      const { listing, error: createError } = await createListing({
+        title: localListing.title,
+        description: localListing.description,
+        price_cents: localListing.price_cents,
+        currency: localListing.currency || 'USD',
+        condition: localListing.condition,
+        category: localListing.category,
+        tags: localListing.tags || [],
+        storage_path: storagePath,
+        thumbnail_path: thumbnailPath,
+        ai_generated: localListing.ai_generated,
+        visibility: localListing.visibility || 'private',
+      });
+
+      if (createError) {
+        throw createError;
+      }
+
+      results.migrated++;
+    } catch (error: any) {
+      console.error(`Error migrating listing: ${localListing.id}`, error);
+      results.failed++;
+      results.errors.push({
+        listingId: localListing.id,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
+  return results;
 }

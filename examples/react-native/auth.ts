@@ -6,15 +6,27 @@
  * Prerequisites:
  * - Install: npm install @supabase/supabase-js expo-secure-store
  * - Set up Supabase client with your project URL and publishable key
+ *
+ * Note: This is an example file. Copy it to your React Native project and install
+ * the required dependencies. TypeScript errors about missing modules are expected
+ * until you install the packages in your project.
  */
 
+// @ts-ignore - Expo provides process.env at build time
 import { createClient } from '@supabase/supabase-js';
+// @ts-ignore - Install expo-secure-store in your project
 import * as SecureStore from 'expo-secure-store';
 
 // Initialize Supabase client
-// Replace with your Supabase project URL and publishable key
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const SUPABASE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 'YOUR_SUPABASE_PUBLISHABLE_KEY';
+// Set these in your .env file or app.config.js
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
+const SUPABASE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+  throw new Error(
+    'Missing Supabase configuration. Please set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY in your environment variables.'
+  );
+}
 
 // Custom storage adapter for Expo SecureStore
 const ExpoSecureStoreAdapter = {

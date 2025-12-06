@@ -1,0 +1,175 @@
+# Instructions
+
+During your interaction with the user, if you find anything reusable in this project (e.g. version of a library, model name), especially about a fix to a mistake you made or a correction you received, you should take note in the `Lessons` section in the `.cursorrules` file so you will not make the same mistake again.
+
+You should also use the `.cursorrules` file as a Scratchpad to organize your thoughts. Especially when you receive a new task, you should first review the content of the Scratchpad, clear old different task if necessary, first explain the task, and plan the steps you need to take to complete the task. You can use todo markers to indicate the progress, e.g.
+[X] Task 1
+[ ] Task 2
+
+Also update the progress of the task in the Scratchpad when you finish a subtask.
+Especially when you finished a milestone, it will help to improve your depth of task accomplishment to use the Scratchpad to reflect and plan.
+The goal is to help you maintain a big picture as well as the progress of the task. Always refer to the Scratchpad when you plan the next step.
+
+# Tools
+
+Note all the tools are in python3. So in the case you need to do batch processing, you can always consult the python files and write your own script.
+
+## Screenshot Verification
+
+The screenshot verification workflow allows you to capture screenshots of web pages and verify their appearance using LLMs. The following tools are available:
+
+1. Screenshot Capture:
+```bash
+venv/bin/python3 tools/screenshot_utils.py URL [--output OUTPUT] [--width WIDTH] [--height HEIGHT]
+```
+
+2. LLM Verification with Images:
+```bash
+venv/bin/python3 tools/llm_api.py --prompt "Your verification question" --provider {openai|anthropic} --image path/to/screenshot.png
+```
+
+Example workflow:
+```python
+from screenshot_utils import take_screenshot_sync
+from llm_api import query_llm
+
+# Take a screenshot
+
+screenshot_path = take_screenshot_sync('https://example.com', 'screenshot.png')
+
+# Verify with LLM
+
+response = query_llm(
+    "What is the background color and title of this webpage?",
+    provider="openai",  # or "anthropic"
+    image_path=screenshot_path
+)
+print(response)
+```
+
+## LLM
+
+You always have an LLM at your side to help you with the task. For simple tasks, you could invoke the LLM by running the following command:
+```
+venv/bin/python3 ./tools/llm_api.py --prompt "What is the capital of France?" --provider "anthropic"
+```
+
+The LLM API supports multiple providers:
+- OpenAI (default, model: gpt-4o)
+- Azure OpenAI (model: configured via AZURE_OPENAI_MODEL_DEPLOYMENT in .env file, defaults to gpt-4o-ms)
+- DeepSeek (model: deepseek-chat)
+- Anthropic (model: claude-3-sonnet-20240229)
+- Gemini (model: gemini-pro)
+- Local LLM (model: Qwen/Qwen2.5-32B-Instruct-AWQ)
+
+But usually it's a better idea to check the content of the file and use the APIs in the `tools/llm_api.py` file to invoke the LLM if needed.
+
+## Web browser
+
+You could use the `tools/web_scraper.py` file to scrape the web.
+```bash
+venv/bin/python3 ./tools/web_scraper.py --max-concurrent 3 URL1 URL2 URL3
+```
+This will output the content of the web pages.
+
+## Search engine
+
+You could use the `tools/search_engine.py` file to search the web.
+```bash
+venv/bin/python3 ./tools/search_engine.py "your search keywords"
+```
+This will output the search results in the following format:
+```
+URL: https://example.com
+Title: This is the title of the search result
+Snippet: This is a snippet of the search result
+```
+If needed, you can further use the `web_scraper.py` file to scrape the web page content.
+
+# Lessons
+
+## User Specified Lessons
+
+- You have a python venv in ./venv. Always use (activate) it when doing python development. First, to check whether 'uv' is available, use `which uv`. If that's the case, first activate the venv, and then use `uv pip install` to install packages. Otherwise, fall back to `pip`.
+- Due to Cursor's limit, when you use `git` and `gh` and need to submit a multiline commit message, first write the message in a file, and then use `git commit -F <filename>` or similar command to commit. And then remove the file. Include "[Cursor] " in the commit message and PR title.
+
+## Cursor learned
+
+- For search results, ensure proper handling of different character encodings (UTF-8) for international queries
+- When using seaborn styles in matplotlib, use 'seaborn-v0_8' instead of 'seaborn' as the style name due to recent seaborn version changes
+- Use 'gpt-4o' as the model name for OpenAI's GPT-4 with vision capabilities
+- When searching for recent news, use the current year (2025) instead of previous years, or simply use the "recent" keyword to get the latest information
+
+# Scratchpad
+
+## Backend Integration and Freemium Mode Implementation (2025-01-XX)
+
+**Task:** Integrate Supabase backend for authentication, quota management, listing persistence. Add Ko-fi payment integration, sharing functionality, and build all required UI screens.
+
+**Progress:**
+[X] Phase 1: Setup and Configuration - Added expo-sharing, created .env template
+[X] Phase 2: Authentication Integration - Created utils/auth.ts, contexts/AuthContext.tsx
+[X] Phase 3: Authentication UI Screens - Created sign-in, sign-up, magic-link, profile screens
+[X] Phase 4: Backend Integration (Listings) - Created utils/listings-api.ts with all functions
+[X] Phase 5: Main App Screens - Created my-listings, settings, upgrade, share screens
+[X] Phase 6: Payment Integration (Ko-fi) - Created utils/payments.ts with Ko-fi integration
+[X] Phase 7: Error Handling - Added quota exceeded, network, auth error handling
+[X] Phase 8: Navigation Structure - Updated root layout with AuthProvider, deep link handling, tab navigation
+[ ] Phase 9: Migration and Cleanup - Need to test and verify all functionality
+
+## Fix iOS Physical Device Development Server Connection Issue (2025-01-XX)
+
+**Problem:** When running `npx expo run:ios --device`, the app installs but shows "no development servers" error. Metro bundler is running at `http://192.168.1.90:8081` but device can't connect.
+
+**Root Cause:** Network connectivity issue - device and Mac may not be on same WiFi, firewall blocking port 8081, or IP address mismatch.
+
+**Solution:** Use tunnel mode (`npx expo start --tunnel`) which works regardless of network configuration. Alternative: ensure same WiFi network and check firewall settings.
+
+**Documentation:** Added troubleshooting section to README.md with three solutions (tunnel mode, same network, manual connection).
+
+## Fix PostHog iOS Production Build Issue (2025-01-XX)
+
+**Problem:** PostHog events worked in simulator but not on iOS production/internal distribution builds.
+
+**Root Cause:** Missing flush configuration (`flushAt`, `flushInterval`) and flush only called on iOS, not all platforms.
+
+**Solution Implemented:**
+- Added `flushAt: 1` to force immediate event sending (no batching)
+- Added `flushInterval: 10000ms` as fallback to ensure events are sent
+- Changed flush to be called on all platforms, not just iOS
+- Enhanced error handling with detailed logging (without exposing secrets)
+- Added configuration status logging to help debug initialization issues
+- Updated README with EAS build configuration instructions
+
+**Key Changes:**
+- `utils/analytics.ts`: Updated PostHog initialization with proper flush config and improved error handling
+- `README.md`: Added EAS secrets configuration documentation
+
+**Note:** For EAS production builds, PostHog environment variables must be set as EAS secrets using `eas secret:create` or the EAS dashboard.
+
+## Create analyze-image Supabase Edge Function (2025-01-XX)
+
+**Task:** Migrate the FastAPI `/api/analyze-image` endpoint to a Supabase Edge Function that analyzes product images using LLM vision models.
+
+**Progress:**
+[X] Create analyze-image Edge Function with LLM integration
+[X] Implement support for multiple LLM providers (OpenAI, Azure, Anthropic, Gemini, DeepSeek, SiliconFlow)
+[X] Implement image encoding and base64 conversion
+[X] Implement JSON parsing and normalization from LLM responses
+[X] Implement error handling (quota, authentication, parsing errors)
+[X] Implement PostHog analytics tracking (non-blocking)
+[X] Use shared CORS headers from `_shared/cors.ts` to match project patterns
+
+**Key Implementation Details:**
+- Location: `supabase/functions/analyze-image/index.ts`
+- Endpoint: `POST /functions/v1/analyze-image`
+- Content-Type: `multipart/form-data`
+- Supports multiple LLM providers with fallback defaults
+- Handles markdown code blocks and extra text in LLM responses
+- Tracks analytics events: `api_analyze_requested`, `api_analyze_success`, `api_analyze_error`
+- Uses shared `corsHeaders` from `_shared/cors.ts` for consistency
+
+**Next Steps:**
+- Set up environment variables in Supabase Dashboard (LLM API keys, PostHog config)
+- Test with various image types and providers
+- Deploy and verify functionality

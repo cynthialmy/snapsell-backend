@@ -88,12 +88,46 @@ Required variables:
 Optional variables:
 - `STRIPE_PRODUCT_ID` - Stripe product ID (for KoFi/Stripe integration validation)
 
-### 5. Deploy Edge Functions
+### 5. Configure Edge Function Secrets
+
+**Important:** Local `.env` files don't work with Supabase Edge Functions. You must set secrets in the Supabase Dashboard.
+
+1. Go to **Supabase Dashboard** → **Project Settings** → **Edge Functions** → **Secrets**
+
+2. Add the following secrets for the `analyze-image` function:
+
+   **Required (at least one LLM provider):**
+   - `AZURE_OPENAI_API_KEY` - Azure OpenAI API key
+   - `AZURE_OPENAI_ENDPOINT` - Azure OpenAI endpoint URL
+   - `AZURE_OPENAI_API_VERSION` - API version (default: `2024-08-01-preview`)
+   - `AZURE_OPENAI_MODEL_DEPLOYMENT` - Model deployment name (default: `gpt-4o-ms`)
+
+   **Optional (for other providers):**
+   - `OPENAI_API_KEY` - OpenAI API key
+   - `OPENAI_BASE_URL` - Custom base URL (default: `https://api.openai.com/v1`)
+   - `OPENAI_MODEL_DEPLOYMENT` - Model name (default: `gpt-4o`)
+   - `ANTHROPIC_API_KEY` - Anthropic API key
+   - `GOOGLE_API_KEY` - Google Gemini API key
+   - `DEEPSEEK_API_KEY` - DeepSeek API key
+   - `SILICONFLOW_API_KEY` - SiliconFlow API key
+
+   **Optional (for analytics):**
+   - `POSTHOG_API_KEY` - PostHog API key
+   - `POSTHOG_HOST` - PostHog host URL (e.g., `https://us.i.posthog.com`)
+
+3. **Copy from local `.env` to Supabase Dashboard:**
+   - Open your local `.env` file
+   - Copy each LLM API key value
+   - Paste into Supabase Dashboard → Edge Functions → Secrets
+   - Click "Add secret" for each variable
+
+### 6. Deploy Edge Functions
 
 ```bash
 # Deploy all functions
 supabase functions deploy upload
 supabase functions deploy generate
+supabase functions deploy analyze-image
 supabase functions deploy listings-create
 supabase functions deploy listings-get-by-slug
 supabase functions deploy feedback-create
@@ -104,7 +138,7 @@ supabase functions deploy usage-check-quota
 supabase functions deploy
 ```
 
-### 6. Configure Stripe Webhook
+### 7. Configure Stripe Webhook
 
 **📖 For detailed step-by-step instructions, see [WEBHOOK_SETUP_GUIDE.md](./WEBHOOK_SETUP_GUIDE.md)**
 
@@ -120,7 +154,7 @@ Quick setup:
 - The webhook will validate product IDs when processing payments
 - Ensure KoFi checkout sessions include `client_reference_id` set to the user's UUID for proper user association
 
-### 7. Set Up Storage Bucket
+### 8. Set Up Storage Bucket
 
 The storage bucket `items` is created automatically via migration. Verify in Supabase Dashboard → Storage.
 
@@ -174,6 +208,37 @@ Upload image to Supabase Storage.
   "filename": "{uuid}.jpg"
 }
 ```
+
+#### `POST /analyze-image`
+Analyze product image using LLM vision models to generate structured listing data.
+
+**Content-Type:** `multipart/form-data`
+
+**Fields:**
+- `image` (file, required): Image file (JPEG, PNG, etc.)
+- `provider` (string, optional): LLM provider (default: "azure")
+- `model` (string, optional): Specific model to use
+- `currency` (string, optional): Currency code (e.g., "USD", "EUR")
+
+**Response:**
+```json
+{
+  "title": "Vintage Leather Office Chair",
+  "price": "125",
+  "description": "Comfortable vintage leather office chair in excellent condition...",
+  "condition": "Used - Like New",
+  "location": "San Francisco",
+  "brand": "",
+  "pickupAvailable": false,
+  "shippingAvailable": false,
+  "pickupNotes": ""
+}
+```
+
+**Error Responses:**
+- `400`: Invalid image file
+- `502`: LLM API error (quota exceeded, authentication failed)
+- `500`: JSON parsing error
 
 #### `POST /generate`
 Generate listing content from image (stubbed for v1).
@@ -417,6 +482,14 @@ curl -X POST http://localhost:54321/functions/v1/upload \
 
 3. **Environment Variables:**
    Set secrets in Supabase Dashboard → Project Settings → Edge Functions → Secrets
+
+   **For `analyze-image` function, set at least one LLM provider:**
+   - Azure OpenAI: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`
+   - OpenAI: `OPENAI_API_KEY`
+   - Anthropic: `ANTHROPIC_API_KEY`
+   - Google: `GOOGLE_API_KEY`
+   - DeepSeek: `DEEPSEEK_API_KEY`
+   - SiliconFlow: `SILICONFLOW_API_KEY`
 
 4. **Stripe Webhook:**
    Update webhook URL to production Edge Function URL
