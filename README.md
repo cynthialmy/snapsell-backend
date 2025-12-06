@@ -558,6 +558,7 @@ supabase functions logs usage-check-quota
 - "Failed to check quota" → Database function `check_free_quota` missing (run migrations)
 - "Failed to upload file" → Storage bucket `items` missing or misconfigured
 - "Bucket not found" → Create `items` bucket in Storage
+- **"new row violates row-level security policy"** → ✅ **Fixed** - Upload function now uses Service Role Key (bypasses RLS)
 
 ### Migration Errors
 
@@ -583,6 +584,8 @@ If migrations fail:
 1. Verify bucket exists: Check Supabase Dashboard → Storage
 2. Check storage policies: `SELECT * FROM storage.policies;`
 3. Ensure file paths match policy patterns: `items/{user_id}/*`
+
+**Note:** The `upload` Edge Function uses the Service Role Key for storage operations, which bypasses RLS policies. This is the recommended approach for Edge Functions as they run server-side and are trusted. The function still validates user authentication before allowing uploads.
 
 ## Environment Variables
 

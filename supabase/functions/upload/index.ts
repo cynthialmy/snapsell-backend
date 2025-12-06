@@ -30,11 +30,13 @@ serve(async (req) => {
     // Use built-in Supabase environment variables (automatically available in Edge Functions)
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!supabaseUrl || !supabaseAnonKey) {
+    if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
       console.error("Missing Supabase environment variables:", {
         hasUrl: !!supabaseUrl,
         hasAnonKey: !!supabaseAnonKey,
+        hasServiceRoleKey: !!supabaseServiceRoleKey,
       });
       return new Response(
         JSON.stringify({
@@ -43,20 +45,21 @@ serve(async (req) => {
           debug: {
             hasUrl: !!supabaseUrl,
             hasAnonKey: !!supabaseAnonKey,
+            hasServiceRoleKey: !!supabaseServiceRoleKey,
           }
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Create Supabase client
+    // Create Supabase client with anon key for user authentication validation
     const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: { Authorization: authHeader },
       },
     });
 
-    // Get authenticated user
+    // Get authenticated user (for security - we still validate the user is authenticated)
     const {
       data: { user },
       error: userError,
@@ -68,6 +71,14 @@ serve(async (req) => {
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    // Create admin client with Service Role Key (bypasses RLS for storage operations)
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    });
 
     // Parse request body
     const body: UploadRequest = await req.json();
@@ -91,8 +102,8 @@ serve(async (req) => {
       const fileName = `${crypto.randomUUID()}.${fileExt}`;
       const filePath = `items/${user.id}/${fileName}`;
 
-      // Upload to Supabase Storage
-      const { data: uploadData, error: uploadError } = await supabaseClient.storage
+      // Upload to Supabase Storage using admin client (bypasses RLS)
+      const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
         .from("items")
         .upload(filePath, binaryData, {
           contentType: body.contentType || "image/jpeg",
@@ -115,8 +126,8 @@ serve(async (req) => {
         );
       }
 
-      // Generate signed URL (valid for 1 hour)
-      const { data: urlData } = await supabaseClient.storage
+      // Generate signed URL (valid for 1 hour) using admin client
+      const { data: urlData } = await supabaseAdmin.storage
         .from("items")
         .createSignedUrl(filePath, 3600);
 
