@@ -137,23 +137,24 @@ supabase functions deploy usage-check-quota
 
 ### "supabaseKey is required" or "Missing required environment variables"
 
-This error means the Edge Function is missing required environment variables. To fix:
+This error means the Edge Function cannot access Supabase configuration.
 
-1. **Go to Supabase Dashboard:**
-   - Navigate to: Project Settings → Edge Functions → Secrets
+**Good news:** Edge Functions automatically have access to Supabase keys! You don't need to manually configure:
+- `SUPABASE_URL` - Automatically available
+- `SUPABASE_ANON_KEY` - Automatically available
+- `SUPABASE_SERVICE_ROLE_KEY` - Automatically available
 
-2. **Add the following secrets:**
-   - `SUPABASE_URL` - Your Supabase project URL (e.g., `https://xxxxx.supabase.co`)
-   - `SUPABASE_SECRET_KEY` - Your Supabase service role key (found in Project Settings → API)
-   - `SUPABASE_PUBLISHABLE_KEY` - Your Supabase anon/public key (found in Project Settings → API)
-   - `FREE_LISTING_LIMIT` - Optional, defaults to 10
-
-3. **Redeploy the Edge Function:**
+**If you see this error:**
+1. Make sure the Edge Function is deployed:
    ```bash
    supabase functions deploy listings-create
    ```
 
-**Important:** The `SUPABASE_SECRET_KEY` is your **service role key** (not the anon key). It's found in your Supabase Dashboard under Project Settings → API → service_role key (secret).
+2. Check that your Supabase project is properly configured
+
+3. Only set secrets for external services (LLM API keys, PostHog, etc.) - not for Supabase keys
+
+**Note:** The `FREE_LISTING_LIMIT` can be set as a secret if you want to override the default (10), but it's optional.
 
 ### TypeScript Errors About Missing Modules
 

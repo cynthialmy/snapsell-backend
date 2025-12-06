@@ -71,16 +71,17 @@ Migrations are located in `supabase/migrations/`:
 
 ### 4. Configure Environment Variables
 
+**For Local Development:**
 Copy `.env.example` to `.env` and fill in your values:
 
 ```bash
 cp .env.example .env
 ```
 
-Required variables:
+Required variables (for local testing):
 - `SUPABASE_URL` - Your Supabase project URL
-- `SUPABASE_PUBLISHABLE_KEY` - Supabase publishable key
-- `SUPABASE_SECRET_KEY` - Supabase secret key (for admin operations)
+- `SUPABASE_PUBLISHABLE_KEY` - Supabase publishable key (anon key)
+- `SUPABASE_SECRET_KEY` - Supabase secret key (service role key, for admin operations)
 - `STRIPE_SECRET_KEY` - Stripe secret key
 - `STRIPE_WEBHOOK_SECRET` - Stripe webhook signing secret
 - `FREE_LISTING_LIMIT` - Free tier listing limit (default: 10)
@@ -88,9 +89,13 @@ Required variables:
 Optional variables:
 - `STRIPE_PRODUCT_ID` - Stripe product ID (for KoFi/Stripe integration validation)
 
+**Important:** For Edge Functions deployed to Supabase, the Supabase keys (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) are **automatically provided** - you don't need to set them manually!
+
 ### 5. Configure Edge Function Secrets
 
 **Important:** Local `.env` files don't work with Supabase Edge Functions. You must set secrets in the Supabase Dashboard.
+
+**Note:** Supabase keys are automatically available in Edge Functions. Only set secrets for external services (LLM APIs, PostHog, etc.).
 
 1. Go to **Supabase Dashboard** → **Project Settings** → **Edge Functions** → **Secrets**
 
@@ -482,6 +487,8 @@ curl -X POST http://localhost:54321/functions/v1/upload \
 
 3. **Environment Variables:**
    Set secrets in Supabase Dashboard → Project Settings → Edge Functions → Secrets
+
+   **Note:** Supabase keys (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) are automatically available - you don't need to set them!
 
    **For `analyze-image` function, set at least one LLM provider:**
    - Azure OpenAI: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`

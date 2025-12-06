@@ -22,9 +22,23 @@ serve(async (req) => {
     const authHeader = req.headers.get("Authorization");
     let userId: string | null = null;
 
+    // Use built-in Supabase environment variables (automatically available in Edge Functions)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          details: "Supabase environment variables are not available."
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? "",
+      supabaseUrl,
+      supabaseAnonKey,
       authHeader
         ? {
             global: {
@@ -70,31 +84,35 @@ serve(async (req) => {
     // Handle attachment upload if provided
     let attachmentPath: string | null = null;
     if (body.attachment && body.attachment_filename) {
-      const supabaseAdmin = createClient(
-        Deno.env.get("SUPABASE_URL") ?? "",
-        Deno.env.get("SUPABASE_SECRET_KEY") ?? ""
-      );
-
-      const folder = userId ? `feedback/${userId}` : "feedback/anonymous";
-      const fileName = `${crypto.randomUUID()}_${body.attachment_filename}`;
-      const filePath = `${folder}/${fileName}`;
-
-      // Decode base64
-      const base64Data = body.attachment.replace(/^data:.*;base64,/, "");
-      const binaryData = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
-
-      const { error: uploadError } = await supabaseAdmin.storage
-        .from("items")
-        .upload(filePath, binaryData, {
-          contentType: "image/jpeg", // Default, adjust if needed
-          upsert: false,
-        });
-
-      if (uploadError) {
-        console.error("Attachment upload error:", uploadError);
-        // Continue without attachment if upload fails
+      // Use service role key for admin operations
+      const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      if (!supabaseServiceRoleKey) {
+        console.error("SUPABASE_SERVICE_ROLE_KEY not available");
+        // Continue without attachment if admin client can't be created
       } else {
-        attachmentPath = filePath;
+        const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+        const folder = userId ? `feedback/${userId}` : "feedback/anonymous";
+        const fileName = `${crypto.randomUUID()}_${body.attachment_filename}`;
+        const filePath = `${folder}/${fileName}`;
+
+        // Decode base64
+        const base64Data = body.attachment.replace(/^data:.*;base64,/, "");
+        const binaryData = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+
+        const { error: uploadError } = await supabaseAdmin.storage
+          .from("items")
+          .upload(filePath, binaryData, {
+            contentType: "image/jpeg", // Default, adjust if needed
+            upsert: false,
+          });
+
+        if (uploadError) {
+          console.error("Attachment upload error:", uploadError);
+          // Continue without attachment if upload fails
+        } else {
+          attachmentPath = filePath;
+        }
       }
     }
 

@@ -43,11 +43,25 @@ serve(async (req) => {
   }
 
   try {
+    // Use built-in Supabase environment variables (automatically available in Edge Functions)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          details: "Supabase environment variables are not available."
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Get authorization header (optional for this endpoint)
     const authHeader = req.headers.get("Authorization");
     const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? "",
+      supabaseUrl,
+      supabaseAnonKey,
       authHeader
         ? {
             global: {

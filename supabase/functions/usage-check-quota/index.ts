@@ -20,21 +20,29 @@ serve(async (req) => {
       );
     }
 
-    // Create Supabase clients
-    const supabaseAdmin = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SECRET_KEY") ?? ""
-    );
+    // Use built-in Supabase environment variables (automatically available in Edge Functions)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
-    const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? "",
-      {
-        global: {
-          headers: { Authorization: authHeader },
-        },
-      }
-    );
+    if (!supabaseUrl || !supabaseServiceRoleKey || !supabaseAnonKey) {
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          details: "Supabase environment variables are not available."
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase clients
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+    const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: {
+        headers: { Authorization: authHeader },
+      },
+    });
 
     // Get authenticated user
     const {

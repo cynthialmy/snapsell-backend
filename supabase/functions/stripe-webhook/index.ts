@@ -135,24 +135,22 @@ serve(async (req) => {
     // Parse event
     const event: StripeEvent = JSON.parse(body);
 
-    // Create Supabase admin client
-    // Use SUPABASE_SERVICE_ROLE_KEY (legacy name) or SUPABASE_SECRET_KEY
-    const supabaseKey = Deno.env.get("SUPABASE_SECRET_KEY") ??
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    // Use built-in Supabase environment variables (automatically available in Edge Functions)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!supabaseUrl || !supabaseKey) {
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
       console.error("Missing Supabase configuration:", {
         hasUrl: !!supabaseUrl,
-        hasKey: !!supabaseKey,
+        hasServiceRoleKey: !!supabaseServiceRoleKey,
       });
       return new Response(
-        JSON.stringify({ error: "Server configuration error", message: "Missing Supabase URL or secret key" }),
+        JSON.stringify({ error: "Server configuration error", message: "Supabase environment variables are not available." }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     // Get configured product ID (for KoFi/Stripe integration)
     const expectedProductId = Deno.env.get("STRIPE_PRODUCT_ID");

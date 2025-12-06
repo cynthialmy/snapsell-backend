@@ -4,17 +4,21 @@ Common issues and solutions when integrating SnapSell backend with your React Na
 
 ## Quick Fixes
 
-### 1. "supabaseKey is required" Error
+### 1. "Server configuration error" or Missing Supabase Keys
 
-**Problem:** Edge Function is missing `SUPABASE_SECRET_KEY` environment variable.
+**Problem:** Edge Function cannot access Supabase environment variables.
 
 **Solution:**
-1. Go to Supabase Dashboard → Project Settings → Edge Functions → Secrets
-2. Add `SUPABASE_SECRET_KEY` with your service role key (found in Project Settings → API)
-3. Also add:
-   - `SUPABASE_URL` - Your project URL
-   - `SUPABASE_PUBLISHABLE_KEY` - Your anon/public key
-4. Redeploy: `supabase functions deploy listings-create`
+Edge Functions automatically have access to `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`. If you see this error, it usually means:
+1. The Edge Function hasn't been deployed yet
+2. There's an issue with your Supabase project configuration
+
+**No manual configuration needed!** The Supabase keys are automatically provided by the Edge Functions runtime.
+
+If the error persists, try redeploying:
+```bash
+supabase functions deploy listings-create
+```
 
 ### 2. "Cannot read property 'Base64' of undefined"
 
@@ -55,15 +59,16 @@ const base64 = await FileSystem.readAsStringAsync(uri, {
 1. **Frontend (.env):**
    ```env
    EXPO_PUBLIC_SUPABASE_URL=https://xxxxx.supabase.co
-   EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_anon_key
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
    ```
 
-2. **Backend (Supabase Dashboard):**
-   - Go to: Project Settings → Edge Functions → Secrets
-   - Add:
+2. **Backend (Edge Functions):**
+   - **No configuration needed!** Edge Functions automatically have access to:
      - `SUPABASE_URL`
-     - `SUPABASE_SECRET_KEY` (service role key)
-     - `SUPABASE_PUBLISHABLE_KEY` (anon key)
+     - `SUPABASE_ANON_KEY`
+     - `SUPABASE_SERVICE_ROLE_KEY`
+   - These are provided automatically by Supabase - you don't need to set them manually
+   - Only set secrets for external services (LLM API keys, PostHog, etc.)
 
 ### Image Upload Issues
 

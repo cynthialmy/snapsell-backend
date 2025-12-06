@@ -25,32 +25,6 @@ serve(async (req) => {
   }
 
   try {
-    // Validate environment variables
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseSecretKey = Deno.env.get("SUPABASE_SECRET_KEY");
-    const supabasePublishableKey = Deno.env.get("SUPABASE_PUBLISHABLE_KEY");
-
-    if (!supabaseUrl || !supabaseSecretKey || !supabasePublishableKey) {
-      const missing = [];
-      if (!supabaseUrl) missing.push("SUPABASE_URL");
-      if (!supabaseSecretKey) missing.push("SUPABASE_SECRET_KEY");
-      if (!supabasePublishableKey) missing.push("SUPABASE_PUBLISHABLE_KEY");
-
-      console.error("Missing environment variables:", {
-        hasUrl: !!supabaseUrl,
-        hasSecretKey: !!supabaseSecretKey,
-        hasPublishableKey: !!supabasePublishableKey,
-        missing,
-      });
-      return new Response(
-        JSON.stringify({
-          error: "Server configuration error",
-          details: `Missing required environment variables: ${missing.join(", ")}. Please set these in Supabase Dashboard → Project Settings → Edge Functions → Secrets.`
-        }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
     // Get authorization header
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
@@ -60,10 +34,30 @@ serve(async (req) => {
       );
     }
 
-    // Create Supabase client with secret key for admin operations
-    const supabaseAdmin = createClient(supabaseUrl, supabaseSecretKey);
+    // Use built-in Supabase environment variables (automatically available in Edge Functions)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
-    const supabaseClient = createClient(supabaseUrl, supabasePublishableKey, {
+    if (!supabaseUrl || !supabaseServiceRoleKey || !supabaseAnonKey) {
+      console.error("Missing Supabase environment variables:", {
+        hasUrl: !!supabaseUrl,
+        hasServiceRoleKey: !!supabaseServiceRoleKey,
+        hasAnonKey: !!supabaseAnonKey,
+      });
+      return new Response(
+        JSON.stringify({
+          error: "Server configuration error",
+          details: "Supabase environment variables are not available. This should not happen in Edge Functions."
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create Supabase client with service role key for admin operations
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+    const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: { Authorization: authHeader },
       },
