@@ -1,0 +1,2 @@
+[functions.analyze-image]
+verify_jwt = false

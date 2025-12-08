@@ -140,3 +140,5 @@ echo "To check function logs:"
 echo "  supabase functions logs upload"
 echo "  supabase functions logs usage-check-quota"
 echo ""
+
+

@@ -86,13 +86,46 @@ serve(async (req) => {
       thumbnailUrl = thumbData?.signedUrl || null;
     }
 
-    // Increment view counter (async, don't wait)
+    // Increment view counter with rate limiting (async, don't wait)
     const viewerIp = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || null;
-    supabaseAdmin.rpc("increment_listing_view", {
-      p_listing_id: listing.id,
-      p_viewer_ip: viewerIp ? viewerIp.split(",")[0].trim() : null,
-      p_viewer_user_id: null, // Public views don't have user_id
-    }).catch((err) => console.error("Failed to increment view:", err));
+    const ipAddress = viewerIp ? viewerIp.split(",")[0].trim() : null;
+
+    if (ipAddress) {
+      // Check rate limit before incrementing (1 view per IP per hour per listing)
+      supabaseAdmin.rpc("check_view_increment_rate_limit", {
+        p_listing_id: listing.id,
+        p_viewer_ip: ipAddress,
+      }).then(({ data: allowed, error: rateLimitError }) => {
+        if (rateLimitError) {
+          console.error("Rate limit check error:", rateLimitError);
+          // On error, allow the increment (fail open)
+          return supabaseAdmin.rpc("increment_listing_view", {
+            p_listing_id: listing.id,
+            p_viewer_ip: ipAddress,
+            p_viewer_user_id: null,
+          }).catch((err) => console.error("Failed to increment view:", err));
+        }
+
+        // Only increment if rate limit allows (data is the boolean return value)
+        if (allowed === true) {
+          return supabaseAdmin.rpc("increment_listing_view", {
+            p_listing_id: listing.id,
+            p_viewer_ip: ipAddress,
+            p_viewer_user_id: null, // Public views don't have user_id
+          }).catch((err) => console.error("Failed to increment view:", err));
+        } else {
+          // Rate limited - view not counted
+          console.log(`View increment rate limited for listing ${listing.id} from IP ${ipAddress}`);
+        }
+      }).catch((err) => console.error("Rate limit check failed:", err));
+    } else {
+      // If no IP, still try to increment (for edge cases)
+      supabaseAdmin.rpc("increment_listing_view", {
+        p_listing_id: listing.id,
+        p_viewer_ip: null,
+        p_viewer_user_id: null,
+      }).catch((err) => console.error("Failed to increment view:", err));
+    }
 
     // Return listing without PII
     return new Response(

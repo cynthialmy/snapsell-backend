@@ -6,19 +6,31 @@
  *
  * Endpoint: POST /functions/v1/analyze-image
  * Content-Type: multipart/form-data
+ * Authentication: OPTIONAL - Unauthenticated users can analyze images (with lower rate limits)
  *
  * Request fields:
  * - image (file, required): Image file (JPEG, PNG, etc.)
  * - provider (string, optional): LLM provider name (default: "azure")
  * - model (string, optional): Specific model to use (default: provider-specific)
  * - currency (string, optional): Currency code for price estimation (e.g., "USD", "EUR")
+ *
+ * Rate Limits:
+ * - Unauthenticated: 10 requests/hour, 5 requests/15 minutes
+ * - Authenticated: 50 requests/hour
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import OpenAI from "https://esm.sh/openai@4.0.0";
 import Anthropic from "https://esm.sh/@anthropic-ai/sdk@0.18.0";
 import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.3.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import {
+    checkRateLimit,
+    getRateLimitHeaders,
+    getRateLimitIdentifier,
+    createRateLimitErrorResponse,
+} from "../_shared/rate-limit.ts";
 
 // ============================================
 // Types
@@ -392,9 +404,86 @@ serve(async (req) => {
     }
 
     try {
-        // Get user if authenticated
+        // IMPORTANT: Authentication is OPTIONAL - this endpoint allows unauthenticated access
+        // Unauthenticated users can analyze images (with lower rate limits)
+        // The frontend only includes Authorization header if user is logged in
+        // We NEVER return 401 for missing auth - unauthenticated requests are always allowed
         const authHeader = req.headers.get("Authorization");
-        const distinctId = authHeader ? "authenticated" : "anonymous";
+        const isAuthenticated = !!authHeader;
+        const distinctId = isAuthenticated ? "authenticated" : "anonymous";
+
+        // Log for debugging (can be removed in production)
+        console.log(`Analyze image request - Authenticated: ${isAuthenticated}`);
+
+        // Initialize Supabase admin client for rate limiting
+        const supabaseUrl = Deno.env.get("SUPABASE_URL");
+        const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+        let userId: string | undefined;
+
+        // Get user ID if authenticated (optional - never blocks unauthenticated requests)
+        if (authHeader && supabaseUrl && supabaseServiceRoleKey) {
+            try {
+                const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+                if (supabaseAnonKey) {
+                    const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+                        global: {
+                            headers: { Authorization: authHeader },
+                        },
+                    });
+                    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+                    if (!authError && user) {
+                        userId = user.id;
+                    }
+                    // If auth fails or user is null, continue as unauthenticated (no error thrown)
+                }
+            } catch (e) {
+                // If auth check fails for any reason, continue as unauthenticated
+                // This ensures unauthenticated users can always use the endpoint
+                console.log("Auth check failed, proceeding as unauthenticated:", e);
+            }
+        }
+
+        // Check rate limits
+        if (supabaseUrl && supabaseServiceRoleKey) {
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const identifier = getRateLimitIdentifier(req, userId);
+
+            // Rate limits:
+            // - Unauthenticated: 10 per hour (60 minutes), 5 per 15 minutes
+            // - Authenticated: 50 per hour
+            const hourlyLimit = userId ? 50 : 10;
+            const hourlyWindow = 60;
+
+            // Check hourly limit first
+            const hourlyResult = await checkRateLimit(
+                supabaseAdmin,
+                identifier,
+                "analyze-image",
+                hourlyLimit,
+                hourlyWindow
+            );
+
+            if (!hourlyResult.allowed) {
+                await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                return createRateLimitErrorResponse(hourlyResult, corsHeaders);
+            }
+
+            // For unauthenticated users, also check 15-minute window (5 requests)
+            if (!userId) {
+                const shortWindowResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-short",
+                    5,
+                    15
+                );
+
+                if (!shortWindowResult.allowed) {
+                    await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                    return createRateLimitErrorResponse(shortWindowResult, corsHeaders);
+                }
+            }
+        }
 
         // Parse form data
         const formData = await req.formData();
@@ -405,28 +494,76 @@ serve(async (req) => {
 
         // Validate image
         if (!imageFile) {
+            // Get rate limit headers
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
             return new Response(
                 JSON.stringify({ detail: "Please upload an image file." }),
                 {
                     status: 400,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
         }
 
         // Validate content type
         if (!imageFile.type || !imageFile.type.startsWith("image/")) {
+            // Get rate limit headers
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
             return new Response(
                 JSON.stringify({ detail: "Please upload an image file." }),
                 {
                     status: 400,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
         }
 
-        // Track request
+        // Track request (after rate limit check passes)
         await trackEvent("api_analyze_requested", { provider }, distinctId);
+
+        // Get rate limit headers for response (re-check to get current state)
+        let rateLimitHeaders: Record<string, string> = {};
+        if (supabaseUrl && supabaseServiceRoleKey) {
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const identifier = getRateLimitIdentifier(req, userId);
+            const hourlyLimit = userId ? 50 : 10;
+            const hourlyResult = await checkRateLimit(
+                supabaseAdmin,
+                identifier,
+                "analyze-image",
+                hourlyLimit,
+                60
+            );
+            rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+        }
 
         // Convert image to bytes
         const imageBytes = new Uint8Array(await imageFile.arrayBuffer());
@@ -470,21 +607,53 @@ serve(async (req) => {
                 detail = `Vision model error: ${errorMessage}`;
             }
 
+            // Get rate limit headers for error response
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
             return new Response(
                 JSON.stringify({ detail }),
                 {
                     status: 502,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
         }
 
         if (!response) {
+            // Get rate limit headers
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
             return new Response(
                 JSON.stringify({ detail: "Vision model failed to return a response." }),
                 {
                     status: 502,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
         }
@@ -495,13 +664,29 @@ serve(async (req) => {
         try {
             parsed = JSON.parse(jsonText);
         } catch (e) {
+            // Get rate limit headers
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
             return new Response(
                 JSON.stringify({
                     detail: `Failed to parse model output as JSON. Raw response: ${response.substring(0, 500)}`,
                 }),
                 {
                     status: 500,
-                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
         }
@@ -520,16 +705,53 @@ serve(async (req) => {
             JSON.stringify(listing),
             {
                 status: 200,
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
             }
         );
     } catch (error: any) {
         console.error("Unexpected error:", error);
+
+        // Try to get rate limit headers even on error
+        let rateLimitHeaders: Record<string, string> = {};
+        try {
+            const supabaseUrl = Deno.env.get("SUPABASE_URL");
+            const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const authHeader = req.headers.get("Authorization");
+                let userId: string | undefined;
+                if (authHeader) {
+                    try {
+                        const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+                        const supabaseClient = createClient(supabaseUrl, supabaseAnonKey || "", {
+                            global: { headers: { Authorization: authHeader } },
+                        });
+                        const { data: { user } } = await supabaseClient.auth.getUser();
+                        userId = user?.id;
+                    } catch (e) {
+                        // Ignore auth errors
+                    }
+                }
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+        } catch (e) {
+            // Ignore rate limit errors in error handler
+        }
+
         return new Response(
             JSON.stringify({ detail: `Internal server error: ${error.message}` }),
             {
                 status: 500,
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
             }
         );
     }

@@ -68,6 +68,8 @@ Migrations are located in `supabase/migrations/`:
 - `20240101000001_rls_policies.sql` - Row-Level Security policies
 - `20240101000002_functions_and_triggers.sql` - Database functions and triggers
 - `20240101000003_storage_policies.sql` - Storage bucket policies
+- `20240101000004_rate_limiting.sql` - Rate limiting table and functions
+- `20240101000005_rate_limits_cron.sql` - Weekly cron job for rate limits cleanup
 
 ### 4. Configure Environment Variables
 
