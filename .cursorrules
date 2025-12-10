@@ -99,6 +99,7 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - When using seaborn styles in matplotlib, use 'seaborn-v0_8' instead of 'seaborn' as the style name due to recent seaborn version changes
 - Use 'gpt-4o' as the model name for OpenAI's GPT-4 with vision capabilities
 - When searching for recent news, use the current year (2025) instead of previous years, or simply use the "recent" keyword to get the latest information
+- **Supabase Email Confirmation Redirects:** When implementing sign-up with email confirmation, always include `emailRedirectTo` in the `signUp` options. Use a deep link scheme (e.g., `snapsell://auth/callback`) for React Native apps, configurable via `EXPO_PUBLIC_DEEP_LINK_SCHEME` environment variable. Users must also configure the Site URL in Supabase Dashboard (Project Settings → Authentication → URL Configuration) to avoid localhost redirects. The default deep link scheme is `snapsell` if not specified.
 
 # Scratchpad
 

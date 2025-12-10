@@ -24,9 +24,12 @@ Create a `.env` file in your project root:
 EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_publishable_key_here
 EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL=https://your-project.supabase.co/functions/v1
+EXPO_PUBLIC_DEEP_LINK_SCHEME=snapsell
 ```
 
 **Note:** The `EXPO_PUBLIC_` prefix is required for Expo to expose these variables to your app.
+
+**Deep Link Scheme:** The `EXPO_PUBLIC_DEEP_LINK_SCHEME` is optional and defaults to `snapsell`. This is used for email confirmation and magic link redirects. Make sure it matches your app's deep link scheme configured in `app.json` or `app.config.js`.
 
 ### Option B: Using `app.config.js` (Expo)
 
@@ -44,6 +47,29 @@ export default {
 ```
 
 Then access via `Constants.expoConfig.extra` in your app.
+
+## Step 2.5: Configure Supabase Dashboard for Email Redirects
+
+To ensure email confirmation links work properly (not redirecting to localhost), you need to configure the Site URL in your Supabase Dashboard:
+
+1. Go to **Supabase Dashboard** → **Project Settings** → **Authentication** → **URL Configuration**
+2. Set **Site URL** - Choose one of these options:
+   - **If you have a website:** Use your website URL (e.g., `https://yourapp.com`)
+   - **If you don't have a website:** Use your app store listing URL or any placeholder URL (e.g., `https://apps.apple.com/app/yourapp` or `https://play.google.com/store/apps/details?id=com.yourapp`)
+   - **For development:** You can temporarily use `http://localhost:3000`, but users won't be able to verify emails from other devices
+3. Add your deep link scheme to **Redirect URLs** (this is the most important part):
+   - `snapsell://auth/callback` (or your custom scheme like `yourapp://auth/callback`)
+   - If you have a website, you can also add: `https://yourapp.com/auth/callback` (optional web fallback)
+
+**Important Notes:**
+- The **Site URL** is mainly used by Supabase for email templates and validation. For React Native apps, the **deep link in Redirect URLs** is what actually matters.
+- The deep link (`snapsell://auth/callback`) is what will open your app when users click the confirmation link in their email.
+- Make sure the deep link scheme matches your app's configuration in `app.json` or `app.config.js`.
+- **The Site URL should NOT be `http://localhost:3000` for production** - use a real URL even if it's just your app store listing.
+
+**What happens:** When a user clicks the confirmation link in their email:
+1. If they're on a mobile device, the deep link (`snapsell://auth/callback`) will open your app
+2. If they're on a desktop, they'll see the Site URL page (which is why you should set it to something meaningful)
 
 ## Step 3: Copy Example Files
 
@@ -116,6 +142,33 @@ supabase functions deploy usage-check-quota
 ```
 
 ## Troubleshooting
+
+### Email Confirmation Links Go to Localhost
+
+If users receive confirmation emails with links pointing to `localhost`, this means:
+
+1. **Check Supabase Dashboard Settings:**
+   - Go to **Project Settings** → **Authentication** → **URL Configuration**
+   - Set **Site URL** to:
+     - Your website URL if you have one (e.g., `https://yourapp.com`)
+     - OR your app store listing URL (e.g., `https://apps.apple.com/app/yourapp`)
+     - OR any placeholder URL (just not `http://localhost:3000`)
+   - **Most importantly:** Add your deep link to **Redirect URLs**: `snapsell://auth/callback`
+     - This is what actually opens your app when users click the email link
+
+2. **Verify Deep Link Configuration:**
+   - The `signUp` function now automatically uses `emailRedirectTo` with your deep link scheme
+   - Make sure `EXPO_PUBLIC_DEEP_LINK_SCHEME` matches your app's scheme in `app.json`
+   - The default is `snapsell`, so if your app uses a different scheme, set it in `.env`
+
+3. **Test the Deep Link:**
+   - On iOS: The link should open your app automatically
+   - On Android: You may need to configure intent filters in `app.json`
+
+**Note:**
+- The code has been updated to automatically include `emailRedirectTo` in sign-up emails
+- For React Native apps, the **deep link in Redirect URLs** is what matters most - the Site URL is mainly for email template validation
+- The Site URL doesn't need to be a real website, but it should be a valid URL (not localhost)
 
 ### "Missing Supabase configuration" Error
 

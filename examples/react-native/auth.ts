@@ -59,10 +59,15 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
  */
 export async function signUp(email: string, password: string, displayName?: string) {
   try {
+    // Get deep link scheme from environment or use default
+    const deepLinkScheme = process.env.EXPO_PUBLIC_DEEP_LINK_SCHEME || 'snapsell';
+    const emailRedirectTo = `${deepLinkScheme}://auth/callback`;
+
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
+        emailRedirectTo,
         data: {
           display_name: displayName || email.split('@')[0],
         },
@@ -102,11 +107,15 @@ export async function signIn(email: string, password: string) {
  */
 export async function signInWithMagicLink(email: string) {
   try {
+    // Get deep link scheme from environment or use default
+    const deepLinkScheme = process.env.EXPO_PUBLIC_DEEP_LINK_SCHEME || 'snapsell';
+    const emailRedirectTo = `${deepLinkScheme}://auth/callback`;
+
     const { data, error } = await supabase.auth.signInWithOtp({
       email,
       options: {
         // You can customize the email template here
-        emailRedirectTo: 'snapsell://auth/callback',
+        emailRedirectTo,
       },
     });
 

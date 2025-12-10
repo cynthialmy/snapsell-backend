@@ -20,9 +20,12 @@ Create a `.env` file in your project root:
 EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
 EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL=https://your-project.supabase.co/functions/v1
+EXPO_PUBLIC_DEEP_LINK_SCHEME=snapsell
 ```
 
-**Note:** `EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL` is optional - it will default to `${EXPO_PUBLIC_SUPABASE_URL}/functions/v1` if not set.
+**Note:**
+- `EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL` is optional - it will default to `${EXPO_PUBLIC_SUPABASE_URL}/functions/v1` if not set.
+- `EXPO_PUBLIC_DEEP_LINK_SCHEME` is optional and defaults to `snapsell`. This is used for email confirmation and magic link redirects. Make sure it matches your app's deep link scheme.
 
 3. **Copy the example files to your React Native project:**
 

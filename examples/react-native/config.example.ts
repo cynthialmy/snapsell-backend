@@ -18,8 +18,9 @@ export const config = {
                 : null),
     },
     app: {
-        // Your app's deep link scheme (for magic link redirects)
-        deepLinkScheme: 'snapsell',
+        // Your app's deep link scheme (for email confirmation and magic link redirects)
+        // This should match EXPO_PUBLIC_DEEP_LINK_SCHEME in your .env file
+        deepLinkScheme: process.env.EXPO_PUBLIC_DEEP_LINK_SCHEME || 'snapsell',
         // Your app's share URL base (for generating share links)
         shareUrlBase: 'https://yourapp.com/share',
     },
