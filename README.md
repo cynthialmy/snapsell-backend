@@ -140,6 +140,8 @@ supabase functions deploy listings-get-by-slug
 supabase functions deploy feedback-create
 supabase functions deploy stripe-webhook
 supabase functions deploy usage-check-quota
+supabase functions deploy create-checkout-session
+supabase functions deploy verify-payment
 
 # Or deploy all at once (if supported)
 supabase functions deploy
@@ -161,7 +163,126 @@ Quick setup:
 - The webhook will validate product IDs when processing payments
 - Ensure KoFi checkout sessions include `client_reference_id` set to the user's UUID for proper user association
 
-### 8. Set Up Storage Bucket
+### 8. Set Up Ko-fi Payment Integration (via Stripe)
+
+This backend supports Ko-fi payments through Stripe checkout. All payments are processed through Stripe, making integration straightforward.
+
+#### A. Create Stripe Products
+
+1. **Credit Packs** - Create three one-time payment products in Stripe Dashboard:
+
+   **Small Credit Pack ($5.00):**
+   - Name: "SnapSell Credits - Small Pack"
+   - Description: "Get 10 credits to create listings beyond your free quota. Each credit allows you to create one additional listing. Credits never expire!"
+   - Price: $5.00 USD (one-time)
+   - Copy the Product ID and Price ID after creation
+
+   **Medium Credit Pack ($10.00):**
+   - Name: "SnapSell Credits - Medium Pack"
+   - Description: "Get 25 credits to create listings beyond your free quota. Best value! Each credit allows you to create one additional listing. Credits never expire!"
+   - Price: $10.00 USD (one-time)
+   - Copy the Product ID and Price ID after creation
+
+   **Large Credit Pack ($20.00):**
+   - Name: "SnapSell Credits - Large Pack"
+   - Description: "Get 60 credits to create listings beyond your free quota. Maximum value! Each credit allows you to create one additional listing. Credits never expire!"
+   - Price: $20.00 USD (one-time)
+   - Copy the Product ID and Price ID after creation
+
+2. **Pro Subscriptions** - Create two recurring subscription products:
+
+   **Pro Monthly ($9.99/month):**
+   - Name: "SnapSell Pro - Monthly"
+   - Description: "Unlimited listings, priority support, and all Pro features. Cancel anytime. Billed monthly."
+   - Price: $9.99/month USD
+   - Billing period: Monthly
+   - Copy the Price ID after creation
+
+   **Pro Yearly ($99.99/year):**
+   - Name: "SnapSell Pro - Yearly"
+   - Description: "Unlimited listings, priority support, and all Pro features. Best value - save 20%! Billed annually."
+   - Price: $99.99/year USD
+   - Billing period: Yearly
+   - Copy the Price ID after creation
+
+#### B. Configure Environment Variables
+
+Add the following secret to Supabase Dashboard → Edge Functions → Secrets:
+
+**Option 1: Individual Product IDs (Simple)**
+- `STRIPE_PRODUCT_ID_CREDITS_10` - Product ID for 10 credits pack
+- `STRIPE_PRODUCT_ID_CREDITS_25` - Product ID for 25 credits pack
+- `STRIPE_PRODUCT_ID_CREDITS_60` - Product ID for 60 credits pack
+- `STRIPE_PRICE_ID_PRO_MONTHLY` - Price ID for monthly Pro subscription
+- `STRIPE_PRICE_ID_PRO_YEARLY` - Price ID for yearly Pro subscription
+
+**Option 2: JSON Mapping (Recommended)**
+
+Set `STRIPE_PRODUCTS_MAPPING` as a JSON string:
+
+```json
+{
+  "credits_10": {
+    "product_id": "prod_xxx",
+    "price_id": "price_xxx",
+    "credits": 10
+  },
+  "credits_25": {
+    "product_id": "prod_xxx",
+    "price_id": "price_xxx",
+    "credits": 25
+  },
+  "credits_60": {
+    "product_id": "prod_xxx",
+    "price_id": "price_xxx",
+    "credits": 60
+  },
+  "pro_monthly": {
+    "price_id": "price_xxx",
+    "type": "subscription"
+  },
+  "pro_yearly": {
+    "price_id": "price_xxx",
+    "type": "subscription"
+  }
+}
+```
+
+#### C. Deploy Payment Functions
+
+```bash
+# Deploy checkout session creator
+supabase functions deploy create-checkout-session
+
+# Deploy payment verification endpoint (optional)
+supabase functions deploy verify-payment
+
+# The stripe-webhook function should already be deployed
+```
+
+#### D. Configure Ko-fi (Optional)
+
+If you want to use Ko-fi's shop interface:
+
+1. Go to [Ko-fi Settings](https://ko-fi.com/manage/settings)
+2. Navigate to **Payment Settings** or **Shop Settings**
+3. Connect your Stripe account
+4. Enable Stripe as the payment processor
+5. Link shop items to your Stripe products
+
+**Note:** The recommended approach is to use Stripe Checkout directly from your app (via the `create-checkout-session` Edge Function), which bypasses Ko-fi's UI and provides a more integrated experience.
+
+#### E. Run Database Migration
+
+Apply the payment tracking migration:
+
+```bash
+supabase db push
+```
+
+This creates the `stripe_payments` table for tracking all transactions.
+
+### 9. Set Up Storage Bucket
 
 The storage bucket `items` is created automatically via migration. Verify in Supabase Dashboard → Storage.
 
@@ -364,6 +485,67 @@ Check current usage and quota.
 }
 ```
 
+#### `POST /create-checkout-session`
+Create a Stripe checkout session for credit purchase or subscription.
+
+**Headers:**
+- `Authorization: Bearer {token}` (required)
+- `Content-Type: application/json`
+
+**Body (Credit Purchase):**
+```json
+{
+  "type": "credits",
+  "credits": 10,
+  "user_id": "uuid"
+}
+```
+
+**Body (Subscription):**
+```json
+{
+  "type": "subscription",
+  "subscription_plan": "monthly",
+  "user_id": "uuid"
+}
+```
+
+**Response:**
+```json
+{
+  "checkout_url": "https://checkout.stripe.com/...",
+  "session_id": "cs_xxx"
+}
+```
+
+#### `GET /verify-payment`
+Verify payment status by session ID or payment intent ID.
+
+**Headers:**
+- `Authorization: Bearer {token}` (required)
+
+**Query Parameters:**
+- `reference_id` or `session_id` - Stripe session ID or payment intent ID
+
+**Response:**
+```json
+{
+  "payment": {
+    "id": "uuid",
+    "status": "completed",
+    "type": "credits",
+    "credits": 10,
+    "amount": 500,
+    "currency": "usd",
+    "created_at": "2025-01-01T00:00:00Z"
+  },
+  "user": {
+    "credits": 15,
+    "plan": "free"
+  }
+}
+```
+
 ## Database Schema
 
 ### Tables
@@ -374,6 +556,7 @@ Check current usage and quota.
 - **feedback**: App and listing feedback
 - **usage_logs**: Usage tracking for quota enforcement
 - **subscriptions**: Stripe subscription mirror
+- **stripe_payments**: Payment tracking for credit purchases and subscriptions
 
 See `supabase/migrations/20240101000000_initial_schema.sql` for full schema.
 

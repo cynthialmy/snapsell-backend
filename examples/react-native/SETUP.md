@@ -248,11 +248,171 @@ This error occurs when reading local image files. The example code has been upda
 
 If you're using your own implementation, ensure you're using the string `'base64'` instead of `FileSystem.EncodingType.Base64`.
 
+## Payment Integration (Ko-fi via Stripe)
+
+### Setup Payment Functions
+
+The backend includes payment integration via Stripe (which can be used with Ko-fi). To enable payments:
+
+1. **Create Stripe Products** (see main `README.md` section 8 for detailed instructions)
+   - Credit packs: 10, 25, 60 credits
+   - Pro subscriptions: Monthly and Yearly
+
+2. **Configure Environment Variables** in Supabase Dashboard:
+   - Set `STRIPE_PRODUCTS_MAPPING` as JSON (see main README for format)
+   - Or set individual product/price IDs
+
+3. **Deploy Payment Functions:**
+   ```bash
+   supabase functions deploy create-checkout-session
+   supabase functions deploy verify-payment
+   ```
+
+### Frontend Integration
+
+**File:** `utils/payments.ts` (create this file)
+
+```typescript
+import { supabase } from './supabase';
+
+const EDGE_FUNCTION_BASE = process.env.EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL;
+
+/**
+ * Create checkout session for credit purchase
+ */
+export async function initiateCreditPurchase(credits: 10 | 25 | 60) {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('Not authenticated');
+    }
+
+    const response = await fetch(`${EDGE_FUNCTION_BASE}/create-checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        type: 'credits',
+        credits: credits,
+        user_id: session.user.id,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to create checkout session');
+    }
+
+    return data.checkout_url;
+  } catch (error: any) {
+    console.error('Credit purchase error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Create checkout session for Pro subscription
+ */
+export async function initiateProSubscription(plan: 'monthly' | 'yearly') {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('Not authenticated');
+    }
+
+    const response = await fetch(`${EDGE_FUNCTION_BASE}/create-checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        type: 'subscription',
+        subscription_plan: plan,
+        user_id: session.user.id,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to create checkout session');
+    }
+
+    return data.checkout_url;
+  } catch (error: any) {
+    console.error('Subscription error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Verify payment status
+ */
+export async function verifyPaymentStatus(sessionId: string) {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('Not authenticated');
+    }
+
+    const response = await fetch(
+      `${EDGE_FUNCTION_BASE}/verify-payment?reference_id=${sessionId}`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to verify payment');
+    }
+
+    return data;
+  } catch (error: any) {
+    console.error('Payment verification error:', error);
+    throw error;
+  }
+}
+```
+
+**Usage in your app:**
+
+```typescript
+import * as Linking from 'expo-linking';
+import { initiateCreditPurchase } from './utils/payments';
+
+// In your upgrade screen component
+const handlePurchaseCredits = async (credits: 10 | 25 | 60) => {
+  try {
+    const checkoutUrl = await initiateCreditPurchase(credits);
+    // Open Stripe checkout in browser
+    await Linking.openURL(checkoutUrl);
+
+    // After payment, user will be redirected back
+    // You can poll verifyPaymentStatus or refresh user data
+  } catch (error) {
+    console.error('Purchase failed:', error);
+  }
+};
+```
+
+**Environment Variables (Frontend):**
+- `EXPO_PUBLIC_SUPABASE_FUNCTIONS_URL` - Already configured in Step 2
+
 ## Next Steps
 
 - See `README.md` for usage examples
 - Check the main backend `README.md` for API documentation
 - Review `BACKEND_VERIFICATION_REPORT.md` to understand what's implemented
+- Set up payment integration using the instructions above
 
 ## Support
 

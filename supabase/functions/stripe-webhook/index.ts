@@ -152,8 +152,47 @@ serve(async (req) => {
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-    // Get configured product ID (for KoFi/Stripe integration)
-    const expectedProductId = Deno.env.get("STRIPE_PRODUCT_ID");
+    // Get product/price mappings for credit calculation
+    // Format: JSON string with mapping of product_id or price_id to credits
+    const productsMappingStr = Deno.env.get("STRIPE_PRODUCTS_MAPPING");
+    let productsMapping: Record<string, any> = {};
+
+    if (productsMappingStr) {
+      try {
+        productsMapping = JSON.parse(productsMappingStr);
+      } catch (e) {
+        console.error("Failed to parse STRIPE_PRODUCTS_MAPPING:", e);
+      }
+    }
+
+    // Helper function to get credits from product/price mapping
+    function getCreditsFromMapping(productId?: string, priceId?: string): number | null {
+      if (!productId && !priceId) return null;
+
+      // Check price_id first (more specific)
+      if (priceId && productsMapping[priceId]) {
+        const mapping = productsMapping[priceId];
+        return mapping.credits || null;
+      }
+
+      // Check product_id
+      if (productId) {
+        // Try direct product_id match
+        if (productsMapping[productId]) {
+          const mapping = productsMapping[productId];
+          return mapping.credits || null;
+        }
+
+        // Try matching by product_id in nested structure
+        for (const key in productsMapping) {
+          if (productsMapping[key].product_id === productId) {
+            return productsMapping[key].credits || null;
+          }
+        }
+      }
+
+      return null;
+    }
 
     // Handle different event types
     switch (event.type) {
@@ -162,24 +201,8 @@ serve(async (req) => {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
         const clientReferenceId = session.client_reference_id; // User ID
-
-        // Optional: Validate product ID if configured (for KoFi integration)
-        if (expectedProductId && session.metadata?.product_id !== expectedProductId) {
-          // Check line items for product ID
-          const lineItems = session.line_items || [];
-          const hasMatchingProduct = lineItems.some(
-            (item: any) => item.price?.product === expectedProductId
-          );
-
-          // If product ID doesn't match and we have one configured, log but continue
-          // (KoFi may pass product ID in different fields)
-          if (!hasMatchingProduct && session.metadata?.product_id) {
-            console.log("Product ID mismatch, but continuing:", {
-              expected: expectedProductId,
-              received: session.metadata?.product_id,
-            });
-          }
-        }
+        const amountTotal = session.amount_total || 0; // Amount in cents
+        const currency = session.currency || 'usd';
 
         // Get user ID from metadata or client_reference_id
         let userId = clientReferenceId;
@@ -199,9 +222,24 @@ serve(async (req) => {
           );
         }
 
+        // Check if this payment was already processed (idempotency)
+        const { data: existingPayment } = await supabaseAdmin
+          .from("stripe_payments")
+          .select("id, status")
+          .eq("stripe_session_id", session.id)
+          .single();
+
+        if (existingPayment && existingPayment.status === 'completed') {
+          console.log("Payment already processed:", session.id);
+          return new Response(
+            JSON.stringify({ received: true, message: "Already processed" }),
+            { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
         // Handle subscription creation
         if (subscriptionId) {
-          // Get subscription details from Stripe (would need Stripe SDK)
+          // Get subscription details from Stripe API (we'll need to fetch it)
           // For now, create a basic subscription record
           const { error: subError } = await supabaseAdmin
             .from("subscriptions")
@@ -221,36 +259,113 @@ serve(async (req) => {
 
           if (subError) {
             console.error("Subscription creation error:", subError);
+          } else {
+            // Update user plan to 'pro'
+            await supabaseAdmin
+              .from("users_profile")
+              .update({ plan: "pro" })
+              .eq("id", userId);
+
+            // Record payment
+            await supabaseAdmin
+              .from("stripe_payments")
+              .insert({
+                user_id: userId,
+                stripe_session_id: session.id,
+                stripe_customer_id: customerId,
+                amount: amountTotal,
+                currency: currency,
+                type: 'subscription',
+                status: 'completed',
+                metadata: { subscription_id: subscriptionId, ...session.metadata },
+              });
+
+            // Log usage
+            await supabaseAdmin
+              .from("usage_logs")
+              .insert({
+                user_id: userId,
+                action: 'purchase_credits',
+                meta: { type: 'subscription', subscription_id: subscriptionId },
+              });
+          }
+        } else {
+          // Handle credit purchase (one-time payment)
+          // First, try to get credits from metadata
+          let creditsAmount = session.metadata?.credits;
+
+          // If not in metadata, try to get from line items via product/price mapping
+          if (!creditsAmount && session.line_items?.data) {
+            const lineItems = session.line_items.data;
+            for (const item of lineItems) {
+              const productId = item.price?.product;
+              const priceId = item.price?.id;
+              const mappedCredits = getCreditsFromMapping(productId, priceId);
+              if (mappedCredits) {
+                creditsAmount = mappedCredits.toString();
+                break;
+              }
+            }
           }
 
-          // Update user plan to 'pro'
-          await supabaseAdmin
-            .from("users_profile")
-            .update({ plan: "pro" })
-            .eq("id", userId);
-        }
+          // Fallback: try to infer from amount (if mapping not available)
+          if (!creditsAmount) {
+            // Rough mapping: $5 = 10 credits, $10 = 25 credits, $20 = 60 credits
+            const amountDollars = amountTotal / 100;
+            if (amountDollars >= 19) creditsAmount = "60";
+            else if (amountDollars >= 9) creditsAmount = "25";
+            else if (amountDollars >= 4) creditsAmount = "10";
+          }
 
-        // Handle credit purchase (check for metadata)
-        const creditsAmount = session.metadata?.credits;
-        if (creditsAmount) {
-          const credits = parseInt(creditsAmount, 10);
-          if (credits > 0) {
-            await supabaseAdmin.rpc("increment_credits", {
-              p_user_id: userId,
-              p_amount: credits,
-            }).catch(async () => {
-              // Fallback if function doesn't exist
-              const { data: profile } = await supabaseAdmin
-                .from("users_profile")
-                .select("credits")
-                .eq("id", userId)
-                .single();
+          if (creditsAmount) {
+            const credits = parseInt(creditsAmount, 10);
+            if (credits > 0) {
+              // Increment credits
+              await supabaseAdmin.rpc("increment_credits", {
+                p_user_id: userId,
+                p_amount: credits,
+              }).catch(async () => {
+                // Fallback if function doesn't exist
+                const { data: profile } = await supabaseAdmin
+                  .from("users_profile")
+                  .select("credits")
+                  .eq("id", userId)
+                  .single();
 
+                await supabaseAdmin
+                  .from("users_profile")
+                  .update({ credits: (profile?.credits || 0) + credits })
+                  .eq("id", userId);
+              });
+
+              // Record payment
               await supabaseAdmin
-                .from("users_profile")
-                .update({ credits: (profile?.credits || 0) + credits })
-                .eq("id", userId);
-            });
+                .from("stripe_payments")
+                .insert({
+                  user_id: userId,
+                  stripe_session_id: session.id,
+                  stripe_customer_id: customerId,
+                  amount: amountTotal,
+                  currency: currency,
+                  type: 'credits',
+                  credits: credits,
+                  status: 'completed',
+                  metadata: session.metadata || {},
+                });
+
+              // Log usage
+              await supabaseAdmin
+                .from("usage_logs")
+                .insert({
+                  user_id: userId,
+                  action: 'purchase_credits',
+                  meta: { type: 'credits', credits: credits, amount: amountTotal },
+                });
+
+              console.log(`Added ${credits} credits to user ${userId}`);
+            }
+          } else {
+            console.warn("No credits amount found for checkout session:", session.id);
           }
         }
 
@@ -330,20 +445,26 @@ serve(async (req) => {
         const invoice = event.data.object;
         const customerId = invoice.customer;
         const subscriptionId = invoice.subscription;
+        const amountPaid = invoice.amount_paid || 0;
+        const currency = invoice.currency || 'usd';
 
         // Handle credit purchases from invoice metadata or line items
-        // KoFi may pass credits in metadata or we can derive from product
         let creditsAmount = invoice.metadata?.credits;
 
-        // If no credits in metadata, check line items for product-based credits
-        if (!creditsAmount && expectedProductId) {
-          const lineItems = invoice.lines?.data || [];
-          const matchingItem = lineItems.find(
-            (item: any) => item.price?.product === expectedProductId
-          );
-          // You can map product to credits here if needed
-          // For now, we'll rely on metadata
+        // If no credits in metadata, try to get from line items via product/price mapping
+        if (!creditsAmount && invoice.lines?.data) {
+          const lineItems = invoice.lines.data;
+          for (const item of lineItems) {
+            const productId = item.price?.product;
+            const priceId = item.price?.id;
+            const mappedCredits = getCreditsFromMapping(productId, priceId);
+            if (mappedCredits) {
+              creditsAmount = mappedCredits.toString();
+              break;
+            }
+          }
         }
+
         if (creditsAmount) {
           const credits = parseInt(creditsAmount, 10);
           if (credits > 0) {
@@ -355,16 +476,40 @@ serve(async (req) => {
               .single();
 
             if (sub) {
-              const { data: profile } = await supabaseAdmin
-                .from("users_profile")
-                .select("credits")
-                .eq("id", sub.user_id)
-                .single();
+              // Increment credits
+              await supabaseAdmin.rpc("increment_credits", {
+                p_user_id: sub.user_id,
+                p_amount: credits,
+              }).catch(async () => {
+                // Fallback if function doesn't exist
+                const { data: profile } = await supabaseAdmin
+                  .from("users_profile")
+                  .select("credits")
+                  .eq("id", sub.user_id)
+                  .single();
 
-              await supabaseAdmin
-                .from("users_profile")
-                .update({ credits: (profile?.credits || 0) + credits })
-                .eq("id", sub.user_id);
+                await supabaseAdmin
+                  .from("users_profile")
+                  .update({ credits: (profile?.credits || 0) + credits })
+                  .eq("id", sub.user_id);
+              });
+
+              // Record payment (if not subscription-related)
+              if (!subscriptionId) {
+                await supabaseAdmin
+                  .from("stripe_payments")
+                  .insert({
+                    user_id: sub.user_id,
+                    stripe_payment_intent_id: invoice.payment_intent,
+                    stripe_customer_id: customerId,
+                    amount: amountPaid,
+                    currency: currency,
+                    type: 'credits',
+                    credits: credits,
+                    status: 'completed',
+                    metadata: invoice.metadata || {},
+                  });
+              }
             }
           }
         }
