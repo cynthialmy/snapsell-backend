@@ -90,3 +90,4 @@ WHERE sp.status = 'completed'
   AND sp.type = 'credits';
 
 
+

@@ -463,19 +463,20 @@ serve(async (req) => {
               });
           }
         } else {
-          // Handle credit purchase (one-time payment)
-          // First, try to get credits from metadata
+          // Handle pack purchase (one-time payment)
+          // Get SKU from metadata or infer from credits amount
+          let sku = session.metadata?.sku;
           let creditsAmount = session.metadata?.credits;
 
-          console.log("Credit purchase detected:", {
+          console.log("Pack purchase detected:", {
             session_id: session.id,
+            metadata_sku: session.metadata?.sku,
             metadata_credits: session.metadata?.credits,
             has_line_items: !!session.line_items,
           });
 
-          // If not in metadata, try to get from line items via product/price mapping
-          // Note: Stripe doesn't expand line_items by default, so we need to fetch them
-          if (!creditsAmount) {
+          // If SKU not in metadata, try to get from line items via product/price mapping
+          if (!sku) {
             // Try to get line items from the session (they might be expanded)
             if (session.line_items?.data) {
               const lineItems = session.line_items.data;
@@ -485,15 +486,16 @@ serve(async (req) => {
                 console.log("Checking line item:", { productId, priceId });
                 const mappedCredits = getCreditsFromMapping(productId, priceId);
                 if (mappedCredits) {
+                  sku = `credits_${mappedCredits}`;
                   creditsAmount = mappedCredits.toString();
-                  console.log("Found credits from mapping:", mappedCredits);
+                  console.log("Found SKU from mapping:", sku);
                   break;
                 }
               }
             }
 
             // If still not found and we have a Stripe secret key, fetch the session with expanded line items
-            if (!creditsAmount) {
+            if (!sku) {
               const stripeSecretKey = stripeMode === "test"
                 ? (Deno.env.get("STRIPE_SECRET_KEY_SANDBOX") || Deno.env.get("STRIPE_SECRET_KEY"))
                 : Deno.env.get("STRIPE_SECRET_KEY");
@@ -517,8 +519,9 @@ serve(async (req) => {
                         console.log("Checking expanded line item:", { productId, priceId });
                         const mappedCredits = getCreditsFromMapping(productId, priceId);
                         if (mappedCredits) {
+                          sku = `credits_${mappedCredits}`;
                           creditsAmount = mappedCredits.toString();
-                          console.log("Found credits from expanded line items:", mappedCredits);
+                          console.log("Found SKU from expanded line items:", sku);
                           break;
                         }
                       }
@@ -531,166 +534,157 @@ serve(async (req) => {
             }
           }
 
-          // Fallback: try to infer from amount (if mapping not available)
-          if (!creditsAmount) {
+          // Fallback: try to infer SKU from amount (if mapping not available)
+          if (!sku) {
             // Rough mapping: $5 = 10 credits, $10 = 25 credits, $20 = 60 credits
             const amountDollars = amountTotal / 100;
-            if (amountDollars >= 19) creditsAmount = "60";
-            else if (amountDollars >= 9) creditsAmount = "25";
-            else if (amountDollars >= 4) creditsAmount = "10";
-            console.log("Using fallback credit inference:", { amountDollars, creditsAmount });
+            if (amountDollars >= 19) {
+              sku = "credits_60";
+              creditsAmount = "60";
+            } else if (amountDollars >= 9) {
+              sku = "credits_25";
+              creditsAmount = "25";
+            } else if (amountDollars >= 4) {
+              sku = "credits_10";
+              creditsAmount = "10";
+            }
+            console.log("Using fallback SKU inference:", { amountDollars, sku });
           }
 
-          if (creditsAmount) {
-            const credits = parseInt(creditsAmount, 10);
-            if (credits > 0) {
-              console.log(`Attempting to add ${credits} credits to user ${userId}`);
+          if (sku) {
+            // Generate idempotency_key from stripe_session_id
+            const idempotencyKey = `stripe_${session.id}`;
 
-              // Use safe_increment_credits which ensures profile exists and handles errors better
-              const { data: creditResult, error: creditError } = await supabaseAdmin.rpc("safe_increment_credits", {
+            console.log(`Applying pack credits: SKU=${sku}, user=${userId}, idempotency_key=${idempotencyKey}`);
+
+            // Apply pack credits using the new function (atomic and idempotent)
+            const { data: packResult, error: packError } = await supabaseAdmin.rpc(
+              "apply_pack_credits",
+              {
                 p_user_id: userId,
-                p_amount: credits,
+                p_sku: sku,
+                p_idempotency_key: idempotencyKey,
+              }
+            );
+
+            if (packError || !packResult?.success) {
+              console.error("Failed to apply pack credits:", {
+                error: packError,
+                result: packResult,
               });
+              return new Response(
+                JSON.stringify({
+                  error: "Failed to apply pack credits",
+                  details: packError?.message || packResult?.error || "Unknown error",
+                }),
+                { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+              );
+            }
 
-              let creditsAdded = false;
+            // Update purchase record with stripe_session_id if it exists
+            const { data: existingPurchase } = await supabaseAdmin
+              .from("purchases")
+              .select("id")
+              .eq("idempotency_key", idempotencyKey)
+              .single();
 
-              if (creditError || !creditResult?.success) {
-                console.error("safe_increment_credits failed, trying increment_credits:", {
-                  error: creditError,
-                  result: creditResult,
-                });
-
-                // Fallback to increment_credits
-                const { error: fallbackError } = await supabaseAdmin.rpc("increment_credits", {
-                  p_user_id: userId,
-                  p_amount: credits,
-                });
-
-                if (fallbackError) {
-                  console.error("increment_credits also failed, using direct update:", fallbackError);
-
-                  // Last resort: direct update
-                  const { data: profile, error: profileError } = await supabaseAdmin
-                    .from("users_profile")
-                    .select("credits")
-                    .eq("id", userId)
-                    .single();
-
-                  if (profileError) {
-                    console.error("Failed to fetch user profile for direct update:", profileError);
-                    // Don't record payment if we can't add credits
-                    return new Response(
-                      JSON.stringify({
-                        error: "Failed to add credits",
-                        details: "Could not update user credits. Payment not recorded."
-                      }),
-                      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-                    );
-                  } else {
-                    const { error: updateError } = await supabaseAdmin
-                      .from("users_profile")
-                      .update({ credits: (profile?.credits || 0) + credits })
-                      .eq("id", userId);
-
-                    if (updateError) {
-                      console.error("Direct update also failed:", updateError);
-                      // Don't record payment if we can't add credits
-                      return new Response(
-                        JSON.stringify({
-                          error: "Failed to add credits",
-                          details: "All credit update methods failed. Payment not recorded."
-                        }),
-                        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-                      );
-                    } else {
-                      creditsAdded = true;
-                      console.log(`Successfully added ${credits} credits via direct update`);
-                    }
-                  }
-                } else {
-                  creditsAdded = true;
-                  console.log(`Successfully added ${credits} credits via increment_credits fallback`);
-                }
-              } else {
-                creditsAdded = true;
-                console.log(`Successfully added ${credits} credits via safe_increment_credits`, creditResult);
-              }
-
-              // Only record payment if credits were successfully added
-              if (!creditsAdded) {
-                console.error("Failed to add credits, not recording payment");
-                return new Response(
-                  JSON.stringify({
-                    error: "Failed to add credits",
-                    details: "Payment processing failed at credit update step"
-                  }),
-                  { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-                );
-              }
-
-              // Record payment (update existing pending payment or insert new)
-              const { data: pendingPayment } = await supabaseAdmin
-                .from("stripe_payments")
-                .select("id")
-                .eq("stripe_session_id", session.id)
-                .single();
-
-              if (pendingPayment) {
-                // Update existing pending payment
-                const { error: updateError } = await supabaseAdmin
-                  .from("stripe_payments")
-                  .update({
-                    status: 'completed',
-                    credits: credits,
-                    stripe_customer_id: customerId,
-                    metadata: session.metadata || {},
-                  })
-                  .eq("id", pendingPayment.id);
-
-                if (updateError) {
-                  console.error("Failed to update payment record:", updateError);
-                }
-              } else {
-                // Insert new payment record
-                const { error: insertError } = await supabaseAdmin
-                  .from("stripe_payments")
-                  .insert({
-                    user_id: userId,
-                    stripe_session_id: session.id,
-                    stripe_customer_id: customerId,
-                    amount: amountTotal,
-                    currency: currency,
-                    type: 'credits',
-                    credits: credits,
-                    status: 'completed',
-                    metadata: session.metadata || {},
-                  });
-
-                if (insertError) {
-                  console.error("Failed to insert payment record:", insertError);
-                }
-              }
-
-              // Log usage
+            if (!existingPurchase) {
+              // Create purchase record if it doesn't exist
               await supabaseAdmin
-                .from("usage_logs")
+                .from("purchases")
                 .insert({
                   user_id: userId,
-                  action: 'purchase_credits',
-                  meta: { type: 'credits', credits: credits, amount: amountTotal },
-                });
-
-              console.log(`Payment processing complete: Added ${credits} credits to user ${userId}`);
+                  sku: sku,
+                  amount_cents: amountTotal,
+                  status: "completed",
+                  idempotency_key: idempotencyKey,
+                  stripe_session_id: session.id,
+                  stripe_customer_id: customerId,
+                  metadata: {
+                    ...session.metadata,
+                    credits: creditsAmount,
+                    type: "credits",
+                  },
+                })
+                .catch((err) => console.error("Failed to create purchase record:", err));
             } else {
-              console.warn("Invalid credits amount:", creditsAmount);
+              // Update existing purchase record with Stripe info
+              await supabaseAdmin
+                .from("purchases")
+                .update({
+                  stripe_session_id: session.id,
+                  stripe_customer_id: customerId,
+                  amount_cents: amountTotal,
+                  metadata: {
+                    ...session.metadata,
+                    credits: creditsAmount,
+                    type: "credits",
+                  },
+                })
+                .eq("id", existingPurchase.id)
+                .catch((err) => console.error("Failed to update purchase record:", err));
             }
+
+            // Also update stripe_payments table for backward compatibility
+            const { data: pendingPayment } = await supabaseAdmin
+              .from("stripe_payments")
+              .select("id")
+              .eq("stripe_session_id", session.id)
+              .single();
+
+            if (pendingPayment) {
+              await supabaseAdmin
+                .from("stripe_payments")
+                .update({
+                  status: "completed",
+                  credits: parseInt(creditsAmount || "0", 10),
+                  stripe_customer_id: customerId,
+                  metadata: session.metadata || {},
+                })
+                .eq("id", pendingPayment.id)
+                .catch((err) => console.error("Failed to update stripe_payments:", err));
+            } else {
+              await supabaseAdmin
+                .from("stripe_payments")
+                .insert({
+                  user_id: userId,
+                  stripe_session_id: session.id,
+                  stripe_customer_id: customerId,
+                  amount: amountTotal,
+                  currency: currency,
+                  type: "credits",
+                  credits: parseInt(creditsAmount || "0", 10),
+                  status: "completed",
+                  metadata: session.metadata || {},
+                })
+                .catch((err) => console.error("Failed to insert stripe_payments:", err));
+            }
+
+            // Track analytics
+            await supabaseAdmin
+              .from("usage_logs")
+              .insert({
+                user_id: userId,
+                action: "purchase_credits",
+                meta: {
+                  type: "pack",
+                  sku: sku,
+                  credits: creditsAmount,
+                  amount: amountTotal,
+                  pack_purchased: true,
+                  pack_applied: true,
+                },
+              })
+              .catch((err) => console.error("Analytics error:", err));
+
+            console.log(`Pack purchase complete: Applied ${sku} pack to user ${userId}`, packResult);
           } else {
-            console.warn("No credits amount found for checkout session:", {
+            console.warn("No SKU found for checkout session:", {
               session_id: session.id,
               metadata: session.metadata,
               amount_total: amountTotal,
             });
-            // Still record the payment even if credits couldn't be determined
+            // Still record the payment even if SKU couldn't be determined
             const { error: insertError } = await supabaseAdmin
               .from("stripe_payments")
               .insert({
@@ -699,13 +693,13 @@ serve(async (req) => {
                 stripe_customer_id: customerId,
                 amount: amountTotal,
                 currency: currency,
-                type: 'credits',
+                type: "credits",
                 credits: 0,
-                status: 'completed',
-                metadata: { ...session.metadata, error: 'credits_not_determined' },
+                status: "completed",
+                metadata: { ...session.metadata, error: "sku_not_determined" },
               });
             if (insertError) {
-              console.error("Failed to record payment without credits:", insertError);
+              console.error("Failed to record payment without SKU:", insertError);
             }
           }
         }

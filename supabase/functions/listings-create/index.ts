@@ -16,7 +16,7 @@ interface CreateListingRequest {
   visibility?: "private" | "shared" | "public";
 }
 
-const FREE_LISTING_LIMIT = parseInt(Deno.env.get("FREE_LISTING_LIMIT") || "10", 10);
+// Removed FREE_LISTING_LIMIT - now using save_slots_remaining from user_quota table
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -129,66 +129,47 @@ serve(async (req) => {
       );
     }
 
-    // Check freemium quota
-    const { data: quotaData, error: quotaError } = await supabaseAdmin.rpc(
-      "check_free_quota",
+    // Check save slots quota
+    const { data: slotsDecremented, error: slotsError } = await supabaseAdmin.rpc(
+      "decrement_save_slots",
       {
         p_user_id: user.id,
-        p_free_limit: FREE_LISTING_LIMIT,
+        p_amount: 1,
       }
     );
 
-    if (quotaError) {
-      console.error("Quota check error:", quotaError);
+    if (slotsError) {
+      console.error("Save slots check error:", slotsError);
       return new Response(
-        JSON.stringify({ error: "Failed to check quota", details: quotaError.message }),
+        JSON.stringify({ error: "Failed to check save slots", details: slotsError.message }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const quota = quotaData?.[0];
-    if (!quota) {
-      return new Response(
-        JSON.stringify({ error: "Failed to retrieve quota information" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Check if user has quota or credits
-    if (!quota.has_quota) {
-      // Get user profile to check credits
-      const { data: profile } = await supabaseAdmin
-        .from("users_profile")
-        .select("credits, plan")
-        .eq("id", user.id)
-        .single();
-
-      if (!profile || profile.credits <= 0) {
-        return new Response(
-          JSON.stringify({
-            error: "Quota exceeded",
-            code: "QUOTA_EXCEEDED",
-            used: quota.used_count,
-            limit: quota.limit_count,
-            remaining: quota.remaining_count,
-            message: "You've reached your free listing limit. Please upgrade or purchase credits.",
-          }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      // User has credits, deduct one
-      const { error: deductError } = await supabaseAdmin.rpc("deduct_credit", {
+    if (!slotsDecremented) {
+      // Get quota info for error message
+      const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
         p_user_id: user.id,
-        p_amount: 1,
       });
+      const quota = quotaData?.[0];
 
-      if (deductError) {
-        return new Response(
-          JSON.stringify({ error: "Failed to deduct credit", details: deductError.message }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
+      // Track analytics
+      await supabaseAdmin.from("usage_logs").insert({
+        user_id: user.id,
+        action: "create_listing",
+        meta: { blocked: true, reason: "save_slots_exceeded" },
+      }).catch((err) => console.error("Analytics error:", err));
+
+      return new Response(
+        JSON.stringify({
+          error: "Save slots exceeded",
+          code: "SAVE_SLOTS_EXCEEDED",
+          save_slots_remaining: quota?.save_slots_remaining || 0,
+          message: "You've reached your save slots limit. Purchase a pack to continue.",
+          purchase_url: "/purchases",
+        }),
+        { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     // Generate share_slug if visibility is shared or public
@@ -261,20 +242,24 @@ serve(async (req) => {
       );
     }
 
+    // Get updated quota info
+    const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
+      p_user_id: user.id,
+    });
+    const quota = quotaData?.[0];
+
     // Log usage
     await supabaseAdmin.from("usage_logs").insert({
       user_id: user.id,
       action: "create_listing",
       meta: { listing_id: listing.id },
-    });
+    }).catch((err) => console.error("Analytics error:", err));
 
     return new Response(
       JSON.stringify({
         listing,
         quota: {
-          used: quota.used_count + 1,
-          limit: quota.limit_count,
-          remaining: Math.max(0, quota.remaining_count - 1),
+          save_slots_remaining: quota?.save_slots_remaining || 0,
         },
       }),
       { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -1,6 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import {
+  checkRateLimit,
+  getRateLimitIdentifier,
+  createRateLimitErrorResponse,
+} from "../_shared/rate-limit.ts";
 
 interface GenerateRequest {
   storage_path: string;
@@ -45,9 +50,10 @@ serve(async (req) => {
   try {
     // Use built-in Supabase environment variables (automatically available in Edge Functions)
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
-    if (!supabaseUrl || !supabaseAnonKey) {
+    if (!supabaseUrl || !supabaseServiceRoleKey || !supabaseAnonKey) {
       return new Response(
         JSON.stringify({
           error: "Server configuration error",
@@ -57,19 +63,97 @@ serve(async (req) => {
       );
     }
 
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
     // Get authorization header (optional for this endpoint)
     const authHeader = req.headers.get("Authorization");
+    const idempotencyKey = req.headers.get("Idempotency-Key");
     const supabaseClient = createClient(
       supabaseUrl,
       supabaseAnonKey,
       authHeader
         ? {
-            global: {
-              headers: { Authorization: authHeader },
-            },
-          }
+          global: {
+            headers: { Authorization: authHeader },
+          },
+        }
         : {}
     );
+
+    // Get authenticated user (if present)
+    let user: any = null;
+    if (authHeader) {
+      const {
+        data: { user: authUser },
+        error: userError,
+      } = await supabaseClient.auth.getUser();
+      if (!userError && authUser) {
+        user = authUser;
+      }
+    }
+
+    // Rate limiting: Always enforce IP-based rate limit (60/min)
+    const identifier = getRateLimitIdentifier(req, user?.id);
+    const rateLimitResult = await checkRateLimit(
+      supabaseAdmin,
+      identifier,
+      "generate",
+      60,
+      1 // 60 requests per minute
+    );
+
+    if (!rateLimitResult.allowed) {
+      return createRateLimitErrorResponse(rateLimitResult, corsHeaders);
+    }
+
+    // If authenticated, check quota
+    if (user) {
+      const { data: quotaDecremented, error: quotaError } = await supabaseAdmin.rpc(
+        "decrement_creation_quota",
+        {
+          p_user_id: user.id,
+          p_amount: 1,
+        }
+      );
+
+      if (quotaError) {
+        console.error("Quota decrement error:", quotaError);
+        return new Response(
+          JSON.stringify({
+            error: "Failed to check quota",
+            details: quotaError.message,
+          }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (!quotaDecremented) {
+        // Track analytics
+        await supabaseAdmin.from("usage_logs").insert({
+          user_id: user.id,
+          action: "generate_copy",
+          meta: { blocked: true, reason: "quota_exceeded" },
+        }).catch((err) => console.error("Analytics error:", err));
+
+        // Get quota info for error message
+        const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
+          p_user_id: user.id,
+        });
+        const quota = quotaData?.[0];
+
+        return new Response(
+          JSON.stringify({
+            error: "Quota exceeded",
+            code: "QUOTA_EXCEEDED",
+            message: "You've reached your daily creation limit. Purchase a pack to continue.",
+            creations_remaining_today: quota?.creations_remaining_today || 0,
+            bonus_creations_remaining: quota?.bonus_creations_remaining || 0,
+            purchase_url: "/purchases",
+          }),
+          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
 
     // Parse request body
     const body: GenerateRequest = await req.json();
@@ -106,6 +190,15 @@ serve(async (req) => {
       generated_at: new Date().toISOString(),
     };
 
+    // Track analytics
+    if (user) {
+      await supabaseAdmin.from("usage_logs").insert({
+        user_id: user.id,
+        action: "generate_copy",
+        meta: { storage_path: body.storage_path },
+      }).catch((err) => console.error("Analytics error:", err));
+    }
+
     return new Response(
       JSON.stringify({
         ai_generated,
@@ -117,7 +210,16 @@ serve(async (req) => {
         category: llmData.category,
         tags: llmData.tags,
       }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+          "X-RateLimit-Limit": rateLimitResult.limit.toString(),
+          "X-RateLimit-Remaining": rateLimitResult.remaining.toString(),
+          "X-RateLimit-Reset": Math.floor(rateLimitResult.resetAt.getTime() / 1000).toString(),
+        },
+      }
     );
   } catch (error) {
     console.error("Error:", error);

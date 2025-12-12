@@ -64,3 +64,4 @@ CREATE TRIGGER on_users_profile_deleted
 -- 2. Use net.http_post() to call: {SUPABASE_URL}/functions/v1/delete-auth-user-internal
 -- 3. Pass the service role key in the Authorization header
 -- Note: This requires storing the Supabase URL and service role key securely (e.g., in Vault)
+

@@ -130,3 +130,4 @@ If you get 401 errors:
    supabase functions logs [function-name]
    ```
 
+

@@ -1,0 +1,2 @@
+[functions.purchases]
+verify_jwt = true
