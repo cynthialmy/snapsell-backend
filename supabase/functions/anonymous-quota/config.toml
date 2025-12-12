@@ -1,0 +1,2 @@
+[functions.anonymous-quota]
+verify_jwt = false

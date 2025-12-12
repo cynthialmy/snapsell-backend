@@ -36,7 +36,13 @@ These functions should have `verify_jwt = false` in their `config.toml`:
 - **Deploy**: `supabase functions deploy listings-get-by-slug --no-verify-jwt`
 - **Note**: Uses service role key directly, handles public shared listings
 
-### 6. `delete-auth-user-internal` ✅
+### 6. `anonymous-quota` ✅
+- **Reason**: Public function for anonymous users to check their daily quota (no auth required)
+- **Config**: `supabase/functions/anonymous-quota/config.toml`
+- **Deploy**: `supabase functions deploy anonymous-quota --no-verify-jwt`
+- **Note**: Tracks anonymous usage by IP address, allows unauthenticated access
+
+### 7. `delete-auth-user-internal` ✅
 - **Reason**: Internal function called by database triggers (uses service role key)
 - **Config**: `supabase/functions/delete-auth-user-internal/config.toml`
 - **Deploy**: `supabase functions deploy delete-auth-user-internal --no-verify-jwt`
@@ -76,6 +82,9 @@ supabase functions deploy fix-missing-credits --no-verify-jwt
 
 # Listings get by slug (public shared listings)
 supabase functions deploy listings-get-by-slug --no-verify-jwt
+
+# Anonymous quota (public quota check for anonymous users)
+supabase functions deploy anonymous-quota --no-verify-jwt
 
 # Delete auth user internal (database trigger function)
 supabase functions deploy delete-auth-user-internal --no-verify-jwt
@@ -118,6 +127,7 @@ supabase functions deploy listings-create
 | `analyze-image` | ❌ Disabled | ✅ Yes | Optional auth |
 | `fix-missing-credits` | ❌ Disabled | ✅ Yes | Service role only |
 | `listings-get-by-slug` | ❌ Disabled | ✅ Yes | Public shared listings |
+| `anonymous-quota` | ❌ Disabled | ✅ Yes | Public quota check for anonymous users |
 | `delete-auth-user-internal` | ❌ Disabled | ✅ Yes | Internal trigger function |
 | All others | ✅ Enabled | ❌ No (default) | User authentication |
 
@@ -148,4 +158,3 @@ If you get 401 errors:
    ```bash
    supabase functions logs [function-name]
    ```
-
