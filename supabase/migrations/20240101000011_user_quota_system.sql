@@ -107,9 +107,9 @@ BEGIN
   END IF;
 
   -- Check if daily reset is needed (reset at midnight UTC)
-  SELECT DATE(last_creation_reset AT TIME ZONE 'UTC') INTO v_last_reset_date
-  FROM public.user_quota
-  WHERE user_id = p_user_id;
+  SELECT DATE(uq.last_creation_reset AT TIME ZONE 'UTC') INTO v_last_reset_date
+  FROM public.user_quota uq
+  WHERE uq.user_id = p_user_id;
 
   SELECT CURRENT_DATE INTO v_reset_date;
 

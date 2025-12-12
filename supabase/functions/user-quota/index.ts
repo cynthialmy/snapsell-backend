@@ -54,6 +54,7 @@ serve(async (req) => {
     }
 
     // Get user quota
+    console.log("Calling get_user_quota for user:", user.id);
     const { data: quotaData, error: quotaError } = await supabaseAdmin.rpc(
       "get_user_quota",
       {
@@ -62,15 +63,25 @@ serve(async (req) => {
     );
 
     if (quotaError) {
-      console.error("Quota fetch error:", quotaError);
+      console.error("Quota fetch error:", JSON.stringify(quotaError, null, 2));
+      console.error("Error details:", {
+        code: quotaError.code,
+        message: quotaError.message,
+        details: quotaError.details,
+        hint: quotaError.hint,
+      });
       return new Response(
         JSON.stringify({
           error: "Failed to fetch quota",
           details: quotaError.message,
+          hint: quotaError.hint || "Check database function get_user_quota exists and is correct",
+          code: quotaError.code,
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    console.log("Quota data received:", quotaData);
 
     const quota = quotaData?.[0];
     if (!quota) {
