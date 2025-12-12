@@ -66,3 +66,4 @@ CREATE TRIGGER on_users_profile_deleted
 -- Note: This requires storing the Supabase URL and service role key securely (e.g., in Vault)
 
 
+

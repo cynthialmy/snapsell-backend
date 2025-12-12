@@ -92,3 +92,6 @@ secrets/
 out/
 .nuxt/
 .vuepress/dist/
+
+
+.secrets/
