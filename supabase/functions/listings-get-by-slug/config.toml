@@ -1,0 +1,2 @@
+[functions.listings-get-by-slug]
+verify_jwt = false

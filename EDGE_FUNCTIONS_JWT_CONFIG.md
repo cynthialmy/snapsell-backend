@@ -30,6 +30,18 @@ These functions should have `verify_jwt = false` in their `config.toml`:
 - **Deploy**: `supabase functions deploy fix-missing-credits --no-verify-jwt`
 - **Note**: Function validates service role key manually
 
+### 5. `listings-get-by-slug` ✅
+- **Reason**: Public function for shared/public listings (no auth required)
+- **Config**: `supabase/functions/listings-get-by-slug/config.toml`
+- **Deploy**: `supabase functions deploy listings-get-by-slug --no-verify-jwt`
+- **Note**: Uses service role key directly, handles public shared listings
+
+### 6. `delete-auth-user-internal` ✅
+- **Reason**: Internal function called by database triggers (uses service role key)
+- **Config**: `supabase/functions/delete-auth-user-internal/config.toml`
+- **Deploy**: `supabase functions deploy delete-auth-user-internal --no-verify-jwt`
+- **Note**: Function validates service role key manually, called internally by triggers
+
 ## Functions with JWT Enabled (Default)
 
 These functions require authentication and should **keep JWT verification enabled**:
@@ -38,7 +50,6 @@ These functions require authentication and should **keep JWT verification enable
 - ✅ `verify-payment` - Requires authenticated user
 - ✅ `listings-create` - Requires authenticated user
 - ✅ `listings-get` - Requires authenticated user
-- ✅ `listings-get-by-slug` - Public but may check auth for private listings
 - ✅ `upload` - Requires authenticated user
 - ✅ `generate` - Requires authenticated user
 - ✅ `feedback-create` - Requires authenticated user
@@ -62,6 +73,12 @@ supabase functions deploy analyze-image --no-verify-jwt
 
 # Fix missing credits (admin function)
 supabase functions deploy fix-missing-credits --no-verify-jwt
+
+# Listings get by slug (public shared listings)
+supabase functions deploy listings-get-by-slug --no-verify-jwt
+
+# Delete auth user internal (database trigger function)
+supabase functions deploy delete-auth-user-internal --no-verify-jwt
 ```
 
 ### Deploy functions with JWT enabled (default):
@@ -100,6 +117,8 @@ supabase functions deploy listings-create
 | `payment-success` | ❌ Disabled | ✅ Yes | Public page |
 | `analyze-image` | ❌ Disabled | ✅ Yes | Optional auth |
 | `fix-missing-credits` | ❌ Disabled | ✅ Yes | Service role only |
+| `listings-get-by-slug` | ❌ Disabled | ✅ Yes | Public shared listings |
+| `delete-auth-user-internal` | ❌ Disabled | ✅ Yes | Internal trigger function |
 | All others | ✅ Enabled | ❌ No (default) | User authentication |
 
 ## Troubleshooting
@@ -129,5 +148,3 @@ If you get 401 errors:
    ```bash
    supabase functions logs [function-name]
    ```
-
-
