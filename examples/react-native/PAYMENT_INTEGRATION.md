@@ -313,12 +313,12 @@ export function UpgradeScreen() {
         Pro Subscription
       </Text>
       <Button
-        title="Subscribe Monthly - $9.99/month"
+        title="Subscribe Monthly - $4.99/month"
         onPress={() => handleSubscribe('monthly')}
         disabled={loading}
       />
       <Button
-        title="Subscribe Yearly - $99.99/year"
+        title="Subscribe Yearly - $35.99/year"
         onPress={() => handleSubscribe('yearly')}
         disabled={loading}
       />
