@@ -17,7 +17,8 @@
  * Response:
  * - For unauthenticated users: Returns ListingData only
  * - For authenticated users: Returns { ...ListingData, quota: {...} }
- *   - Quota is deducted before analysis (creation quota)
+ *   - Quota is checked before analysis (but not deducted)
+ *   - Quota is deducted ONLY after successful analysis with meaningful data
  *   - Updated quota is returned in the response
  *
  * Rate Limits:
@@ -25,8 +26,10 @@
  * - Authenticated: 50 requests/hour
  *
  * Quota:
- * - Authenticated users: Creation quota is deducted before analysis
+ * - Authenticated users: Quota availability is checked before analysis
+ * - Quota is deducted ONLY after successful analysis (prevents quota loss on LLM failures)
  * - Returns 402 status with quota info if quota exceeded
+ * - Returns 502 status if LLM fails or returns empty/invalid data (quota not deducted)
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -443,14 +446,21 @@ serve(async (req) => {
                     const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
                     if (!authError && user) {
                         userId = user.id;
+                        console.log(`User authenticated: ${userId}`);
+                    } else {
+                        console.log(`Auth check failed - error: ${authError?.message}, user: ${user?.id || "null"}`);
                     }
                     // If auth fails or user is null, continue as unauthenticated (no error thrown)
+                } else {
+                    console.log("SUPABASE_ANON_KEY not found, cannot verify user");
                 }
             } catch (e) {
                 // If auth check fails for any reason, continue as unauthenticated
                 // This ensures unauthenticated users can always use the endpoint
                 console.log("Auth check failed, proceeding as unauthenticated:", e);
             }
+        } else {
+            console.log(`Auth check skipped - authHeader: ${!!authHeader}, supabaseUrl: ${!!supabaseUrl}, serviceRoleKey: ${!!supabaseServiceRoleKey}`);
         }
 
         // Check rate limits
@@ -575,19 +585,15 @@ serve(async (req) => {
             rateLimitHeaders = getRateLimitHeaders(hourlyResult);
         }
 
-        // If authenticated, check and decrement creation quota before analyzing
+        // If authenticated, check quota availability (but don't decrement yet - only after successful analysis)
         if (userId && supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
-            const { data: quotaDecremented, error: quotaError } = await supabaseAdmin.rpc(
-                "decrement_creation_quota",
-                {
-                    p_user_id: userId,
-                    p_amount: 1,
-                }
-            );
+            const { data: quotaData, error: quotaError } = await supabaseAdmin.rpc("get_user_quota", {
+                p_user_id: userId,
+            });
 
             if (quotaError) {
-                console.error("Creation quota check error:", quotaError);
+                console.error("Quota check error:", quotaError);
                 return new Response(
                     JSON.stringify({
                         error: "Failed to check creation quota",
@@ -600,13 +606,10 @@ serve(async (req) => {
                 );
             }
 
-            if (!quotaDecremented) {
-                // Get quota info for error message
-                const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
-                    p_user_id: userId,
-                });
-                const quota = quotaData?.[0];
+            const quota = quotaData?.[0];
+            const totalCreationsRemaining = (quota?.creations_remaining_today ?? 0) + (quota?.bonus_creations_remaining ?? 0);
 
+            if (totalCreationsRemaining < 1) {
                 // Track analytics (non-blocking)
                 supabaseAdmin.from("usage_logs").insert({
                     user_id: userId,
@@ -645,7 +648,9 @@ serve(async (req) => {
         // Call LLM
         let response: string;
         try {
+            console.log(`Calling LLM with provider: ${provider}, model: ${model || "default"}`);
             response = await queryLLM(provider, prompt, imageBytes, mimeType, model);
+            console.log(`LLM response received, length: ${response?.length || 0}, preview: ${response?.substring(0, 200) || "empty"}`);
         } catch (error: any) {
             const errorMessage = String(error.message || error);
 
@@ -730,10 +735,18 @@ serve(async (req) => {
 
         // Parse JSON from response
         const jsonText = extractJsonFromResponse(response);
+        console.log(`Extracted JSON text, length: ${jsonText?.length || 0}, preview: ${jsonText?.substring(0, 200) || "empty"}`);
         let parsed: any;
         try {
             parsed = JSON.parse(jsonText);
+            console.log(`Parsed JSON successfully:`, {
+                hasTitle: !!parsed.title,
+                hasPrice: !!parsed.price,
+                hasDescription: !!parsed.description,
+                keys: Object.keys(parsed)
+            });
         } catch (e) {
+            console.error(`JSON parse error:`, e, `Raw JSON text:`, jsonText.substring(0, 500));
             // Get rate limit headers
             let rateLimitHeaders: Record<string, string> = {};
             if (supabaseUrl && supabaseServiceRoleKey) {
@@ -764,6 +777,92 @@ serve(async (req) => {
         // Normalize and return
         const listing = normalizeListing(parsed);
 
+        // Validate that we got meaningful data from the LLM
+        const hasMeaningfulData = listing.title && listing.title.trim().length > 0;
+        if (!hasMeaningfulData) {
+            console.error("LLM returned empty or invalid data:", {
+                provider,
+                rawResponse: response.substring(0, 200),
+                parsed,
+                listing
+            });
+
+            await trackEvent("api_analyze_error", { provider, error_type: "empty_response" }, distinctId);
+
+            // Get rate limit headers for error response
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
+            return new Response(
+                JSON.stringify({
+                    error: "Image analysis failed",
+                    detail: "The vision model did not return valid listing data. Please try again with a clearer image.",
+                    code: "ANALYSIS_FAILED"
+                }),
+                {
+                    status: 502,
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
+                }
+            );
+        }
+
+        // If authenticated, decrement quota AFTER successful analysis
+        if (userId && supabaseUrl && supabaseServiceRoleKey) {
+            console.log(`[Quota] Decrementing quota for user ${userId} after successful analysis`);
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+            // Get quota before decrement for logging
+            const { data: quotaBeforeData } = await supabaseAdmin.rpc("get_user_quota", {
+                p_user_id: userId,
+            });
+            const quotaBefore = quotaBeforeData?.[0];
+            console.log(`[Quota] Before decrement:`, {
+                creations_remaining_today: quotaBefore?.creations_remaining_today,
+                bonus_creations_remaining: quotaBefore?.bonus_creations_remaining,
+            });
+
+            const { data: quotaDecremented, error: quotaDecrementError } = await supabaseAdmin.rpc(
+                "decrement_creation_quota",
+                {
+                    p_user_id: userId,
+                    p_amount: 1,
+                }
+            );
+
+            console.log(`[Quota] Decrement result:`, {
+                userId,
+                quotaDecremented,
+                error: quotaDecrementError,
+                errorMessage: quotaDecrementError?.message,
+                errorCode: quotaDecrementError?.code,
+            });
+
+            if (quotaDecrementError) {
+                console.error("[Quota] Decrement error after successful analysis:", JSON.stringify(quotaDecrementError, null, 2));
+                // Don't fail the request - analysis succeeded, but log the error
+            } else if (!quotaDecremented) {
+                console.error("[Quota] Decrement returned false after successful analysis - quota may have been exhausted between check and decrement");
+                // This could happen if quota was exhausted between the check and decrement
+                // But don't fail the request since analysis succeeded
+            } else {
+                console.log(`[Quota] Successfully decremented for user ${userId}`);
+            }
+        } else {
+            console.log(`[Quota] Skipping decrement - userId: ${userId}, hasUrl: ${!!supabaseUrl}, hasServiceKey: ${!!supabaseServiceRoleKey}`);
+        }
+
         // Track success
         await trackEvent(
             "api_analyze_success",
@@ -771,7 +870,7 @@ serve(async (req) => {
             distinctId
         );
 
-        // Get updated quota info after successful analysis (for authenticated users)
+        // Get updated quota info after successful analysis and decrement (for authenticated users)
         let quota: any = null;
         if (userId && supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
@@ -780,9 +879,13 @@ serve(async (req) => {
             });
 
             if (quotaFetchError) {
-                console.error("Error fetching updated quota:", quotaFetchError);
+                console.error("[Quota] Error fetching updated quota:", JSON.stringify(quotaFetchError, null, 2));
             } else {
                 quota = quotaData?.[0];
+                console.log(`[Quota] After decrement:`, {
+                    creations_remaining_today: quota?.creations_remaining_today,
+                    bonus_creations_remaining: quota?.bonus_creations_remaining,
+                });
             }
         }
 

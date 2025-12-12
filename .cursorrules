@@ -172,8 +172,16 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - Handles markdown code blocks and extra text in LLM responses
 - Tracks analytics events: `api_analyze_requested`, `api_analyze_success`, `api_analyze_error`
 - Uses shared `corsHeaders` from `_shared/cors.ts` for consistency
-- **Quota Management:** For authenticated users, creation quota is deducted before analysis. Returns 402 status with quota info if quota exceeded. On success, returns updated quota in response (similar to `/listings-create`).
+- **Quota Management:**
+  - Quota availability is checked BEFORE analysis (but not deducted)
+  - Quota is deducted ONLY AFTER successful analysis with meaningful data
+  - This prevents quota loss when LLM fails or returns empty/invalid data
+  - Returns 402 status with quota info if quota exceeded
+  - Returns 502 status if LLM fails or returns empty data (quota not deducted)
+  - On success, returns updated quota in response (similar to `/listings-create`)
 - **Response Format:** Unauthenticated users receive ListingData only. Authenticated users receive `{ ...ListingData, quota: {...} }` with updated quota information.
+- **Validation:** Validates that LLM response contains meaningful data (at least a title). Returns error if analysis fails or returns empty data.
+- **Logging:** Added detailed logging for LLM responses to help debug analysis failures.
 
 **Next Steps:**
 - Set up environment variables in Supabase Dashboard (LLM API keys, PostHog config)
