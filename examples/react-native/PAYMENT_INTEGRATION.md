@@ -358,11 +358,18 @@ useEffect(() => {
 
 ## Testing
 
-1. Use Stripe test mode for development
-2. Test credit purchases with test card: `4242 4242 4242 4242`
-3. Verify credits are added to user account
-4. Test subscription creation and cancellation
-5. Verify webhook events in Stripe Dashboard
+1. **Backend Sandbox Mode:** Set `STRIPE_MODE=test` in Supabase secrets to use sandbox products and keys
+2. **Test Cards:** Use Stripe test cards:
+   - Success: `4242 4242 4242 4242`
+   - Decline: `4000 0000 0000 0002`
+   - 3D Secure: `4000 0025 0000 3155`
+   - Use any future expiry date and any 3-digit CVC
+3. **Test Mode Indicator:** Stripe Checkout will automatically show "TEST MODE" when using test keys
+4. Verify credits are added to user account after successful test payment
+5. Test subscription creation and cancellation
+6. Verify webhook events in Stripe Dashboard (Test mode)
+
+**Note:** No frontend code changes needed - the backend automatically handles test vs production mode. The same frontend code works for both.
 
 ## Troubleshooting
 

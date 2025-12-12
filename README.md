@@ -154,9 +154,16 @@ supabase functions deploy
 Quick setup:
 1. Deploy the `stripe-webhook` Edge Function
 2. Get your webhook URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/stripe-webhook`
-3. In Stripe Dashboard → Webhooks → Add endpoint
-4. Select events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`
-5. Copy the webhook signing secret and add it to Supabase secrets as `STRIPE_WEBHOOK_SECRET`
+3. **For Test Mode:** In Stripe Dashboard (Test mode) → Webhooks → Add endpoint
+   - Use the same URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/stripe-webhook`
+   - Select events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`
+   - Copy the test webhook signing secret → Add to Supabase secrets as `STRIPE_WEBHOOK_SECRET_SANDBOX`
+4. **For Production:** In Stripe Dashboard (Live mode) → Webhooks → Add endpoint
+   - Use the same URL: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/stripe-webhook`
+   - Select the same events
+   - Copy the live webhook signing secret → Add to Supabase secrets as `STRIPE_WEBHOOK_SECRET`
+
+**Note:** You can use the same endpoint URL for both test and live webhooks. The webhook handler automatically detects test vs live events using Stripe's `livemode` field and uses the appropriate secret.
 
 **Note for KoFi Integration:**
 - If using KoFi with Stripe, set `STRIPE_PRODUCT_ID` to your Stripe product ID (e.g., `prod_TXmIdyUe4w9sOT`)
@@ -191,23 +198,23 @@ This backend supports Ko-fi payments through Stripe checkout. All payments are p
 
 2. **Pro Subscriptions** - Create two recurring subscription products:
 
-   **Pro Monthly ($9.99/month):**
+   **Pro Monthly ($4.99/month):**
    - Name: "SnapSell Pro - Monthly"
    - Description: "Unlimited listings, priority support, and all Pro features. Cancel anytime. Billed monthly."
-   - Price: $9.99/month USD
+   - Price: $4.99/month USD
    - Billing period: Monthly
    - Copy the Price ID after creation
 
-   **Pro Yearly ($99.99/year):**
+   **Pro Yearly ($35.99/year):**
    - Name: "SnapSell Pro - Yearly"
    - Description: "Unlimited listings, priority support, and all Pro features. Best value - save 20%! Billed annually."
-   - Price: $99.99/year USD
+   - Price: $35.99/year USD
    - Billing period: Yearly
    - Copy the Price ID after creation
 
 #### B. Configure Environment Variables
 
-Add the following secret to Supabase Dashboard → Edge Functions → Secrets:
+Add the following secrets to Supabase Dashboard → Edge Functions → Secrets:
 
 **Option 1: Individual Product IDs (Simple)**
 - `STRIPE_PRODUCT_ID_CREDITS_10` - Product ID for 10 credits pack
@@ -218,7 +225,8 @@ Add the following secret to Supabase Dashboard → Edge Functions → Secrets:
 
 **Option 2: JSON Mapping (Recommended)**
 
-Set `STRIPE_PRODUCTS_MAPPING` as a JSON string:
+**For Production:**
+Set `STRIPE_PRODUCTS_MAPPING` as a JSON string (single line):
 
 ```json
 {
@@ -247,6 +255,28 @@ Set `STRIPE_PRODUCTS_MAPPING` as a JSON string:
   }
 }
 ```
+
+**For Testing/Sandbox (Optional):**
+
+To use Stripe test mode products during development and previews:
+
+1. Create test products in Stripe Dashboard (make sure you're in **Test mode**)
+2. Set `STRIPE_PRODUCTS_MAPPING_SANDBOX` with your test product mappings (same JSON format)
+3. Set `STRIPE_MODE` to `"test"` to use sandbox products, or `"production"` (default) for live products
+
+**Stripe Keys for Sandbox Mode:**
+
+When using test mode, you can optionally set separate Stripe keys:
+- `STRIPE_SECRET_KEY_SANDBOX` - Stripe test secret key (starts with `sk_test_`)
+- `STRIPE_PUBLISHABLE_KEY_SANDBOX` - Stripe test publishable key (starts with `pk_test_`) - Note: This is mainly for frontend use
+- `STRIPE_WEBHOOK_SECRET_SANDBOX` - Stripe test webhook signing secret
+
+If sandbox keys are not set, the functions will fall back to the production keys.
+
+**Switching between test and production:**
+- Set `STRIPE_MODE=test` in Supabase secrets → uses sandbox products and keys
+- Set `STRIPE_MODE=production` (or leave unset) → uses production products and keys
+- Make sure your Stripe keys match the mode (test keys for test mode, live keys for production)
 
 #### C. Deploy Payment Functions
 

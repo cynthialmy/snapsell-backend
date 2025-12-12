@@ -81,8 +81,12 @@ serve(async (req) => {
       );
     }
 
-    // Get Stripe secret key
-    const stripeSecretKey = Deno.env.get("STRIPE_SECRET_KEY");
+    // Get Stripe secret key (support test/sandbox mode)
+    const stripeMode = Deno.env.get("STRIPE_MODE") || "production";
+    const stripeSecretKey = stripeMode === "test"
+      ? (Deno.env.get("STRIPE_SECRET_KEY_SANDBOX") || Deno.env.get("STRIPE_SECRET_KEY"))
+      : Deno.env.get("STRIPE_SECRET_KEY");
+
     if (!stripeSecretKey) {
       return new Response(
         JSON.stringify({ error: "Stripe not configured" }),
@@ -90,15 +94,20 @@ serve(async (req) => {
       );
     }
 
-    // Get product/price mappings
-    const productsMappingStr = Deno.env.get("STRIPE_PRODUCTS_MAPPING");
+    // Get product/price mappings (support test/sandbox mode)
+    const stripeMode = Deno.env.get("STRIPE_MODE") || "production"; // "test" or "production"
+    const mappingKey = stripeMode === "test"
+      ? "STRIPE_PRODUCTS_MAPPING_SANDBOX"
+      : "STRIPE_PRODUCTS_MAPPING";
+
+    const productsMappingStr = Deno.env.get(mappingKey) || Deno.env.get("STRIPE_PRODUCTS_MAPPING");
     let productsMapping: Record<string, any> = {};
 
     if (productsMappingStr) {
       try {
         productsMapping = JSON.parse(productsMappingStr);
       } catch (e) {
-        console.error("Failed to parse STRIPE_PRODUCTS_MAPPING:", e);
+        console.error(`Failed to parse ${mappingKey}:`, e);
       }
     }
 

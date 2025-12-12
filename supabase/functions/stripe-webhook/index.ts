@@ -70,6 +70,7 @@ async function verifyStripeSignature(
 interface StripeEvent {
   id: string;
   type: string;
+  livemode: boolean; // false = test mode, true = live mode
   data: {
     object: any;
   };
@@ -84,11 +85,17 @@ serve(async (req) => {
   try {
     // Get Stripe signature - webhooks don't use Authorization headers
     const signature = req.headers.get("stripe-signature");
-    const webhookSecret = Deno.env.get("STRIPE_WEBHOOK_SECRET");
+
+    // Support test/sandbox mode for webhook secret
+    const stripeMode = Deno.env.get("STRIPE_MODE") || "production";
+    const webhookSecret = stripeMode === "test"
+      ? (Deno.env.get("STRIPE_WEBHOOK_SECRET_SANDBOX") || Deno.env.get("STRIPE_WEBHOOK_SECRET"))
+      : Deno.env.get("STRIPE_WEBHOOK_SECRET");
 
     // Log for debugging (remove in production or use proper logging)
     console.log("Webhook received:", {
       method: req.method,
+      mode: stripeMode,
       hasSignature: !!signature,
       hasSecret: !!webhookSecret,
       headers: Object.fromEntries(req.headers.entries()),
@@ -152,16 +159,21 @@ serve(async (req) => {
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-    // Get product/price mappings for credit calculation
+    // Get product/price mappings for credit calculation (support test/sandbox mode)
     // Format: JSON string with mapping of product_id or price_id to credits
-    const productsMappingStr = Deno.env.get("STRIPE_PRODUCTS_MAPPING");
+    const stripeMode = Deno.env.get("STRIPE_MODE") || "production"; // "test" or "production"
+    const mappingKey = stripeMode === "test"
+      ? "STRIPE_PRODUCTS_MAPPING_SANDBOX"
+      : "STRIPE_PRODUCTS_MAPPING";
+
+    const productsMappingStr = Deno.env.get(mappingKey) || Deno.env.get("STRIPE_PRODUCTS_MAPPING");
     let productsMapping: Record<string, any> = {};
 
     if (productsMappingStr) {
       try {
         productsMapping = JSON.parse(productsMappingStr);
       } catch (e) {
-        console.error("Failed to parse STRIPE_PRODUCTS_MAPPING:", e);
+        console.error(`Failed to parse ${mappingKey}:`, e);
       }
     }
 
