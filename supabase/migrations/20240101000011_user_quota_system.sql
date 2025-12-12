@@ -175,27 +175,27 @@ BEGIN
     RETURN false;
   END IF;
 
-  -- Use bonus first, then daily
-  IF v_bonus >= p_amount THEN
-    -- Use only bonus
-    UPDATE public.user_quota
-    SET
-      bonus_creations_remaining = bonus_creations_remaining - p_amount,
-      updated_at = now()
-    WHERE user_id = p_user_id;
-  ELSIF v_bonus > 0 THEN
-    -- Use all bonus and some daily
-    UPDATE public.user_quota
-    SET
-      bonus_creations_remaining = 0,
-      creations_remaining_today = creations_remaining_today - (p_amount - v_bonus),
-      updated_at = now()
-    WHERE user_id = p_user_id;
-  ELSE
+  -- Use daily (free) quota first, then bonus (purchased) quota
+  IF v_daily >= p_amount THEN
     -- Use only daily
     UPDATE public.user_quota
     SET
       creations_remaining_today = creations_remaining_today - p_amount,
+      updated_at = now()
+    WHERE user_id = p_user_id;
+  ELSIF v_daily > 0 THEN
+    -- Use all daily and some bonus
+    UPDATE public.user_quota
+    SET
+      creations_remaining_today = 0,
+      bonus_creations_remaining = bonus_creations_remaining - (p_amount - v_daily),
+      updated_at = now()
+    WHERE user_id = p_user_id;
+  ELSE
+    -- Use only bonus
+    UPDATE public.user_quota
+    SET
+      bonus_creations_remaining = bonus_creations_remaining - p_amount,
       updated_at = now()
     WHERE user_id = p_user_id;
   END IF;
