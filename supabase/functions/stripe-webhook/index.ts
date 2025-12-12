@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import Stripe from "https://esm.sh/stripe@14?target=denonext";
 import { corsHeaders } from "../_shared/cors.ts";
 
 // Stripe webhook signature verification using HMAC
@@ -23,7 +24,24 @@ async function verifyStripeSignature(
     const signatureToVerify = sigHeader.v1;
 
     if (!timestamp || !signatureToVerify) {
+      console.error("Missing timestamp or signature in stripe-signature header");
       return false;
+    }
+
+    // Decode webhook secret if it starts with whsec_ (base64 encoded)
+    let decodedSecret: string;
+    if (secret.startsWith('whsec_')) {
+      try {
+        // Remove whsec_ prefix and decode base64
+        const base64Secret = secret.substring(6);
+        decodedSecret = atob(base64Secret);
+      } catch (e) {
+        console.error("Failed to decode webhook secret:", e);
+        return false;
+      }
+    } else {
+      // Use secret as-is if it doesn't start with whsec_
+      decodedSecret = secret;
     }
 
     // Create the signed payload
@@ -33,7 +51,7 @@ async function verifyStripeSignature(
     const encoder = new TextEncoder();
     const key = await crypto.subtle.importKey(
       'raw',
-      encoder.encode(secret),
+      encoder.encode(decodedSecret),
       { name: 'HMAC', hash: 'SHA-256' },
       false,
       ['sign']
@@ -67,14 +85,7 @@ async function verifyStripeSignature(
   }
 }
 
-interface StripeEvent {
-  id: string;
-  type: string;
-  livemode: boolean; // false = test mode, true = live mode
-  data: {
-    object: any;
-  };
-}
+// Using Stripe.Event type from SDK instead of custom interface
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -98,7 +109,8 @@ serve(async (req) => {
       mode: stripeMode,
       hasSignature: !!signature,
       hasSecret: !!webhookSecret,
-      headers: Object.fromEntries(req.headers.entries()),
+      webhookSecretPrefix: webhookSecret ? webhookSecret.substring(0, 10) + "..." : null,
+      signaturePrefix: signature ? signature.substring(0, 30) + "..." : null,
     });
 
     if (!signature) {
@@ -126,21 +138,64 @@ serve(async (req) => {
     // Get raw body for signature verification
     const body = await req.text();
 
-    // Verify signature
-    const isValid = await verifyStripeSignature(body, signature, webhookSecret);
-    if (!isValid) {
-      console.error("Invalid signature verification");
-      return new Response(
-        JSON.stringify({
-          error: "Invalid signature",
-          message: "Webhook signature verification failed"
-        }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    // Verify signature using Stripe SDK (handles whsec_ decoding automatically)
+    // Create Stripe instance for webhook verification (API key not needed for webhooks)
+    const stripeSecretKey = stripeMode === "test"
+      ? (Deno.env.get("STRIPE_SECRET_KEY_SANDBOX") || Deno.env.get("STRIPE_SECRET_KEY"))
+      : Deno.env.get("STRIPE_SECRET_KEY");
 
-    // Parse event
-    const event: StripeEvent = JSON.parse(body);
+    const stripe = stripeSecretKey
+      ? new Stripe(stripeSecretKey, { apiVersion: '2024-11-20.acacia' })
+      : null;
+
+    let event: Stripe.Event;
+    try {
+      if (stripe) {
+        // Use Stripe SDK for verification (handles whsec_ decoding)
+        const cryptoProvider = Stripe.createSubtleCryptoProvider();
+        event = await stripe.webhooks.constructEventAsync(
+          body,
+          signature,
+          webhookSecret,
+          undefined,
+          cryptoProvider
+        );
+      } else {
+        // Fallback to manual verification if Stripe SDK not available
+        const isValid = await verifyStripeSignature(body, signature, webhookSecret);
+        if (!isValid) {
+          throw new Error("Manual signature verification failed");
+        }
+        event = JSON.parse(body) as Stripe.Event;
+      }
+    } catch (err: any) {
+      console.error("Stripe webhook signature verification failed:", {
+        error: err.message,
+        signature_length: signature?.length,
+        body_length: body.length,
+        has_webhook_secret: !!webhookSecret,
+        webhook_secret_length: webhookSecret?.length,
+        webhook_secret_starts_with_whsec: webhookSecret?.startsWith('whsec_'),
+        signature_preview: signature?.substring(0, 30) + "...",
+        using_stripe_sdk: !!stripe,
+      });
+
+      // Try manual verification as fallback
+      const isValid = await verifyStripeSignature(body, signature, webhookSecret);
+      if (!isValid) {
+        return new Response(
+          JSON.stringify({
+            error: "Invalid signature",
+            message: "Webhook signature verification failed. Check that STRIPE_WEBHOOK_SECRET matches the webhook endpoint secret in Stripe Dashboard.",
+            details: err.message
+          }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // If manual verification passed, parse event manually
+      event = JSON.parse(body) as Stripe.Event;
+    }
 
     // Use built-in Supabase environment variables (automatically available in Edge Functions)
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -161,7 +216,7 @@ serve(async (req) => {
 
     // Get product/price mappings for credit calculation (support test/sandbox mode)
     // Format: JSON string with mapping of product_id or price_id to credits
-    const stripeMode = Deno.env.get("STRIPE_MODE") || "production"; // "test" or "production"
+    // Reuse stripeMode from above
     const mappingKey = stripeMode === "test"
       ? "STRIPE_PRODUCTS_MAPPING_SANDBOX"
       : "STRIPE_PRODUCTS_MAPPING";
@@ -207,7 +262,8 @@ serve(async (req) => {
     }
 
     // Handle different event types
-    switch (event.type) {
+    const eventType = event.type as string;
+    switch (eventType) {
       case "checkout.session.completed": {
         const session = event.data.object;
         const customerId = session.customer;
@@ -216,8 +272,17 @@ serve(async (req) => {
         const amountTotal = session.amount_total || 0; // Amount in cents
         const currency = session.currency || 'usd';
 
+        console.log("Processing checkout.session.completed:", {
+          session_id: session.id,
+          customer_id: customerId,
+          subscription_id: subscriptionId,
+          client_reference_id: clientReferenceId,
+          amount_total: amountTotal,
+          metadata: session.metadata,
+        });
+
         // Get user ID from metadata or client_reference_id
-        let userId = clientReferenceId;
+        let userId = clientReferenceId || session.metadata?.user_id;
 
         // If no client_reference_id, try to find user by email
         if (!userId && session.customer_email) {
@@ -227,22 +292,118 @@ serve(async (req) => {
         }
 
         if (!userId) {
-          console.error("Could not find user for checkout session:", session.id);
+          console.error("Could not find user for checkout session:", {
+            session_id: session.id,
+            customer_email: session.customer_email,
+            client_reference_id: clientReferenceId,
+            metadata: session.metadata,
+          });
           return new Response(
             JSON.stringify({ error: "User not found" }),
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
 
+        // Verify user exists in auth.users
+        const { data: authUser, error: authUserError } = await supabaseAdmin.auth.admin.getUserById(userId);
+        if (authUserError || !authUser) {
+          console.error("User not found in auth.users:", {
+            user_id: userId,
+            error: authUserError,
+          });
+          return new Response(
+            JSON.stringify({ error: "User not found in auth system" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Ensure users_profile exists (in case trigger failed)
+        const { error: ensureProfileError } = await supabaseAdmin.rpc("ensure_users_profile_exists", {
+          p_user_id: userId,
+        });
+        if (ensureProfileError) {
+          console.error("Failed to ensure users_profile exists:", ensureProfileError);
+          // Continue anyway - we'll handle it in credit increment
+        }
+
         // Check if this payment was already processed (idempotency)
         const { data: existingPayment } = await supabaseAdmin
           .from("stripe_payments")
-          .select("id, status")
+          .select("id, status, credits")
           .eq("stripe_session_id", session.id)
           .single();
 
         if (existingPayment && existingPayment.status === 'completed') {
-          console.log("Payment already processed:", session.id);
+          console.log("Payment already processed:", {
+            session_id: session.id,
+            existing_credits: existingPayment.credits,
+          });
+
+          // If credits weren't added before (0 or NULL), try to add them now
+          if (!existingPayment.credits || existingPayment.credits === 0) {
+            console.log("Payment completed but credits missing, attempting to fix...");
+            // Try to determine credits from metadata or amount
+            let creditsToAdd = session.metadata?.credits
+              ? parseInt(session.metadata.credits, 10)
+              : null;
+
+            if (!creditsToAdd) {
+              // Fallback: infer from amount
+              const amountDollars = amountTotal / 100;
+              if (amountDollars >= 19) creditsToAdd = 60;
+              else if (amountDollars >= 9) creditsToAdd = 25;
+              else if (amountDollars >= 4) creditsToAdd = 10;
+            }
+
+            if (creditsToAdd && creditsToAdd > 0) {
+              // Use safe_increment_credits which ensures profile exists
+              const { data: creditResult, error: creditError } = await supabaseAdmin.rpc("safe_increment_credits", {
+                p_user_id: userId,
+                p_amount: creditsToAdd,
+              });
+
+              if (creditError || !creditResult?.success) {
+                console.error("Failed to increment credits for existing payment:", {
+                  error: creditError,
+                  result: creditResult,
+                });
+                // Try fallback
+                const { error: fallbackError } = await supabaseAdmin.rpc("increment_credits", {
+                  p_user_id: userId,
+                  p_amount: creditsToAdd,
+                });
+                if (fallbackError) {
+                  console.error("Fallback increment_credits also failed:", fallbackError);
+                }
+              } else {
+                // Update payment record with credits
+                const { error: updateError } = await supabaseAdmin
+                  .from("stripe_payments")
+                  .update({ credits: creditsToAdd })
+                  .eq("id", existingPayment.id);
+
+                if (updateError) {
+                  console.error("Failed to update payment record with credits:", updateError);
+                } else {
+                  console.log(`Fixed missing credits: Added ${creditsToAdd} credits to user ${userId}`, creditResult);
+                }
+              }
+            } else {
+              console.warn("Could not determine credits to add for existing payment");
+            }
+          } else if (existingPayment.credits > 0) {
+            // Credits already added, but double-check they're in the user's account
+            // (in case there was a race condition or error)
+            const { error: creditError } = await supabaseAdmin.rpc("increment_credits", {
+              p_user_id: userId,
+              p_amount: existingPayment.credits,
+            });
+            // Silently ignore error if credits were already added (idempotent operation)
+            if (!creditError) {
+              console.log(`Verified credits for user ${userId}`);
+            }
+          }
+
           return new Response(
             JSON.stringify({ received: true, message: "Already processed" }),
             { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -306,16 +467,66 @@ serve(async (req) => {
           // First, try to get credits from metadata
           let creditsAmount = session.metadata?.credits;
 
+          console.log("Credit purchase detected:", {
+            session_id: session.id,
+            metadata_credits: session.metadata?.credits,
+            has_line_items: !!session.line_items,
+          });
+
           // If not in metadata, try to get from line items via product/price mapping
-          if (!creditsAmount && session.line_items?.data) {
-            const lineItems = session.line_items.data;
-            for (const item of lineItems) {
-              const productId = item.price?.product;
-              const priceId = item.price?.id;
-              const mappedCredits = getCreditsFromMapping(productId, priceId);
-              if (mappedCredits) {
-                creditsAmount = mappedCredits.toString();
-                break;
+          // Note: Stripe doesn't expand line_items by default, so we need to fetch them
+          if (!creditsAmount) {
+            // Try to get line items from the session (they might be expanded)
+            if (session.line_items?.data) {
+              const lineItems = session.line_items.data;
+              for (const item of lineItems) {
+                const productId = item.price?.product;
+                const priceId = item.price?.id;
+                console.log("Checking line item:", { productId, priceId });
+                const mappedCredits = getCreditsFromMapping(productId, priceId);
+                if (mappedCredits) {
+                  creditsAmount = mappedCredits.toString();
+                  console.log("Found credits from mapping:", mappedCredits);
+                  break;
+                }
+              }
+            }
+
+            // If still not found and we have a Stripe secret key, fetch the session with expanded line items
+            if (!creditsAmount) {
+              const stripeSecretKey = stripeMode === "test"
+                ? (Deno.env.get("STRIPE_SECRET_KEY_SANDBOX") || Deno.env.get("STRIPE_SECRET_KEY"))
+                : Deno.env.get("STRIPE_SECRET_KEY");
+
+              if (stripeSecretKey) {
+                try {
+                  // Fetch session with expanded line items
+                  const stripeResponse = await fetch(`https://api.stripe.com/v1/checkout/sessions/${session.id}?expand[]=line_items`, {
+                    headers: {
+                      "Authorization": `Bearer ${stripeSecretKey}`,
+                    },
+                  });
+
+                  if (stripeResponse.ok) {
+                    const expandedSession = await stripeResponse.json();
+                    if (expandedSession.line_items?.data) {
+                      const lineItems = expandedSession.line_items.data;
+                      for (const item of lineItems) {
+                        const productId = item.price?.product;
+                        const priceId = item.price?.id;
+                        console.log("Checking expanded line item:", { productId, priceId });
+                        const mappedCredits = getCreditsFromMapping(productId, priceId);
+                        if (mappedCredits) {
+                          creditsAmount = mappedCredits.toString();
+                          console.log("Found credits from expanded line items:", mappedCredits);
+                          break;
+                        }
+                      }
+                    }
+                  }
+                } catch (error) {
+                  console.error("Failed to fetch expanded session:", error);
+                }
               }
             }
           }
@@ -327,43 +538,138 @@ serve(async (req) => {
             if (amountDollars >= 19) creditsAmount = "60";
             else if (amountDollars >= 9) creditsAmount = "25";
             else if (amountDollars >= 4) creditsAmount = "10";
+            console.log("Using fallback credit inference:", { amountDollars, creditsAmount });
           }
 
           if (creditsAmount) {
             const credits = parseInt(creditsAmount, 10);
             if (credits > 0) {
-              // Increment credits
-              await supabaseAdmin.rpc("increment_credits", {
+              console.log(`Attempting to add ${credits} credits to user ${userId}`);
+
+              // Use safe_increment_credits which ensures profile exists and handles errors better
+              const { data: creditResult, error: creditError } = await supabaseAdmin.rpc("safe_increment_credits", {
                 p_user_id: userId,
                 p_amount: credits,
-              }).catch(async () => {
-                // Fallback if function doesn't exist
-                const { data: profile } = await supabaseAdmin
-                  .from("users_profile")
-                  .select("credits")
-                  .eq("id", userId)
-                  .single();
-
-                await supabaseAdmin
-                  .from("users_profile")
-                  .update({ credits: (profile?.credits || 0) + credits })
-                  .eq("id", userId);
               });
 
-              // Record payment
-              await supabaseAdmin
-                .from("stripe_payments")
-                .insert({
-                  user_id: userId,
-                  stripe_session_id: session.id,
-                  stripe_customer_id: customerId,
-                  amount: amountTotal,
-                  currency: currency,
-                  type: 'credits',
-                  credits: credits,
-                  status: 'completed',
-                  metadata: session.metadata || {},
+              let creditsAdded = false;
+
+              if (creditError || !creditResult?.success) {
+                console.error("safe_increment_credits failed, trying increment_credits:", {
+                  error: creditError,
+                  result: creditResult,
                 });
+
+                // Fallback to increment_credits
+                const { error: fallbackError } = await supabaseAdmin.rpc("increment_credits", {
+                  p_user_id: userId,
+                  p_amount: credits,
+                });
+
+                if (fallbackError) {
+                  console.error("increment_credits also failed, using direct update:", fallbackError);
+
+                  // Last resort: direct update
+                  const { data: profile, error: profileError } = await supabaseAdmin
+                    .from("users_profile")
+                    .select("credits")
+                    .eq("id", userId)
+                    .single();
+
+                  if (profileError) {
+                    console.error("Failed to fetch user profile for direct update:", profileError);
+                    // Don't record payment if we can't add credits
+                    return new Response(
+                      JSON.stringify({
+                        error: "Failed to add credits",
+                        details: "Could not update user credits. Payment not recorded."
+                      }),
+                      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                    );
+                  } else {
+                    const { error: updateError } = await supabaseAdmin
+                      .from("users_profile")
+                      .update({ credits: (profile?.credits || 0) + credits })
+                      .eq("id", userId);
+
+                    if (updateError) {
+                      console.error("Direct update also failed:", updateError);
+                      // Don't record payment if we can't add credits
+                      return new Response(
+                        JSON.stringify({
+                          error: "Failed to add credits",
+                          details: "All credit update methods failed. Payment not recorded."
+                        }),
+                        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                      );
+                    } else {
+                      creditsAdded = true;
+                      console.log(`Successfully added ${credits} credits via direct update`);
+                    }
+                  }
+                } else {
+                  creditsAdded = true;
+                  console.log(`Successfully added ${credits} credits via increment_credits fallback`);
+                }
+              } else {
+                creditsAdded = true;
+                console.log(`Successfully added ${credits} credits via safe_increment_credits`, creditResult);
+              }
+
+              // Only record payment if credits were successfully added
+              if (!creditsAdded) {
+                console.error("Failed to add credits, not recording payment");
+                return new Response(
+                  JSON.stringify({
+                    error: "Failed to add credits",
+                    details: "Payment processing failed at credit update step"
+                  }),
+                  { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+                );
+              }
+
+              // Record payment (update existing pending payment or insert new)
+              const { data: pendingPayment } = await supabaseAdmin
+                .from("stripe_payments")
+                .select("id")
+                .eq("stripe_session_id", session.id)
+                .single();
+
+              if (pendingPayment) {
+                // Update existing pending payment
+                const { error: updateError } = await supabaseAdmin
+                  .from("stripe_payments")
+                  .update({
+                    status: 'completed',
+                    credits: credits,
+                    stripe_customer_id: customerId,
+                    metadata: session.metadata || {},
+                  })
+                  .eq("id", pendingPayment.id);
+
+                if (updateError) {
+                  console.error("Failed to update payment record:", updateError);
+                }
+              } else {
+                // Insert new payment record
+                const { error: insertError } = await supabaseAdmin
+                  .from("stripe_payments")
+                  .insert({
+                    user_id: userId,
+                    stripe_session_id: session.id,
+                    stripe_customer_id: customerId,
+                    amount: amountTotal,
+                    currency: currency,
+                    type: 'credits',
+                    credits: credits,
+                    status: 'completed',
+                    metadata: session.metadata || {},
+                  });
+
+                if (insertError) {
+                  console.error("Failed to insert payment record:", insertError);
+                }
+              }
 
               // Log usage
               await supabaseAdmin
@@ -374,10 +680,33 @@ serve(async (req) => {
                   meta: { type: 'credits', credits: credits, amount: amountTotal },
                 });
 
-              console.log(`Added ${credits} credits to user ${userId}`);
+              console.log(`Payment processing complete: Added ${credits} credits to user ${userId}`);
+            } else {
+              console.warn("Invalid credits amount:", creditsAmount);
             }
           } else {
-            console.warn("No credits amount found for checkout session:", session.id);
+            console.warn("No credits amount found for checkout session:", {
+              session_id: session.id,
+              metadata: session.metadata,
+              amount_total: amountTotal,
+            });
+            // Still record the payment even if credits couldn't be determined
+            const { error: insertError } = await supabaseAdmin
+              .from("stripe_payments")
+              .insert({
+                user_id: userId,
+                stripe_session_id: session.id,
+                stripe_customer_id: customerId,
+                amount: amountTotal,
+                currency: currency,
+                type: 'credits',
+                credits: 0,
+                status: 'completed',
+                metadata: { ...session.metadata, error: 'credits_not_determined' },
+              });
+            if (insertError) {
+              console.error("Failed to record payment without credits:", insertError);
+            }
           }
         }
 
@@ -488,23 +817,48 @@ serve(async (req) => {
               .single();
 
             if (sub) {
-              // Increment credits
-              await supabaseAdmin.rpc("increment_credits", {
+              // Ensure profile exists
+              await supabaseAdmin.rpc("ensure_users_profile_exists", {
+                p_user_id: sub.user_id,
+              });
+
+              // Increment credits using safe method
+              const { data: creditResult, error: creditError } = await supabaseAdmin.rpc("safe_increment_credits", {
                 p_user_id: sub.user_id,
                 p_amount: credits,
-              }).catch(async () => {
-                // Fallback if function doesn't exist
-                const { data: profile } = await supabaseAdmin
-                  .from("users_profile")
-                  .select("credits")
-                  .eq("id", sub.user_id)
-                  .single();
-
-                await supabaseAdmin
-                  .from("users_profile")
-                  .update({ credits: (profile?.credits || 0) + credits })
-                  .eq("id", sub.user_id);
               });
+
+              if (creditError || !creditResult?.success) {
+                console.error("safe_increment_credits failed for invoice, trying fallback:", {
+                  error: creditError,
+                  result: creditResult,
+                });
+
+                // Fallback to increment_credits
+                const { error: fallbackError } = await supabaseAdmin.rpc("increment_credits", {
+                  p_user_id: sub.user_id,
+                  p_amount: credits,
+                });
+
+                if (fallbackError) {
+                  console.error("increment_credits fallback also failed:", fallbackError);
+                  // Last resort: direct update
+                  const { data: profile, error: profileError } = await supabaseAdmin
+                    .from("users_profile")
+                    .select("credits")
+                    .eq("id", sub.user_id)
+                    .single();
+
+                  if (!profileError && profile) {
+                    await supabaseAdmin
+                      .from("users_profile")
+                      .update({ credits: (profile.credits || 0) + credits })
+                      .eq("id", sub.user_id);
+                  }
+                }
+              } else {
+                console.log(`Successfully added ${credits} credits via safe_increment_credits for invoice`, creditResult);
+              }
 
               // Record payment (if not subscription-related)
               if (!subscriptionId) {
