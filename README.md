@@ -287,6 +287,9 @@ supabase functions deploy create-checkout-session
 # Deploy payment verification endpoint (optional)
 supabase functions deploy verify-payment
 
+# Deploy payment success redirect handler (optional, but recommended)
+supabase functions deploy payment-success
+
 # The stripe-webhook function should already be deployed
 ```
 

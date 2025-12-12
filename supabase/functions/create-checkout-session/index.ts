@@ -115,9 +115,11 @@ serve(async (req) => {
     // Get success/cancel URLs from request body or use defaults
     // Frontend can pass deep link URLs (e.g., snapsell://payment/success?session_id={CHECKOUT_SESSION_ID})
     // Note: Custom scheme URLs may not work in all browsers; consider using Universal Links/App Links
+    // If no URLs provided, use a simple success page URL that won't cause errors
     const baseUrl = Deno.env.get("SUPABASE_URL")?.replace("/rest/v1", "") || "";
-    const successUrl = body.success_url || `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = body.cancel_url || `${baseUrl}/payment/cancel`;
+    // Default to a simple success message page (or frontend should always provide URLs)
+    const successUrl = body.success_url || `https://checkout.stripe.com/success?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = body.cancel_url || `https://checkout.stripe.com/cancel`;
 
     let priceId: string | undefined;
     let metadata: Record<string, string> = {

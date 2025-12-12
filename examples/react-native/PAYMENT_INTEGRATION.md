@@ -188,12 +188,16 @@ export function UpgradeScreen() {
     try {
       setLoading(true);
 
-      // Optional: Set up deep link URLs for redirect after payment
-      // Note: Custom scheme URLs (snapsell://) may not work in all browsers
-      // Consider using Universal Links (iOS) / App Links (Android) instead
+      // IMPORTANT: Always provide success_url and cancel_url
+      // Option 1: Use deep link URLs (may not work in all browsers)
       const deepLinkScheme = 'snapsell'; // or get from your config
       const successUrl = `${deepLinkScheme}://payment/success?session_id={CHECKOUT_SESSION_ID}`;
       const cancelUrl = `${deepLinkScheme}://payment/cancel`;
+
+      // Option 2: Use your backend's payment-success endpoint (recommended)
+      // const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+      // const successUrl = `${supabaseUrl}/functions/v1/payment-success?session_id={CHECKOUT_SESSION_ID}`;
+      // const cancelUrl = `${supabaseUrl}/functions/v1/payment-success?cancelled=true`;
 
       const checkoutUrl = await initiateCreditPurchase(credits, {
         successUrl,
@@ -204,15 +208,31 @@ export function UpgradeScreen() {
       const canOpen = await Linking.canOpenURL(checkoutUrl);
       if (canOpen) {
         await Linking.openURL(checkoutUrl);
+
+        // IMPORTANT: Set up a listener for when user returns from payment
+        // The webhook processes payment automatically, but we should refresh user data
+        const checkPaymentStatus = async () => {
+          // Wait a few seconds for webhook to process
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          // Refresh user data to get updated credits
+          try {
+            await refreshUser();
+            console.log('User data refreshed after payment');
+          } catch (error) {
+            console.error('Failed to refresh user data:', error);
+          }
+        };
+
         Alert.alert(
           'Payment Started',
-          'Complete your payment in the browser. Your credits will be added automatically.',
+          'Complete your payment in the browser. Your credits will be added automatically when you return to the app.',
           [
             {
               text: 'OK',
               onPress: () => {
-                // Optionally poll for payment status or refresh user data
-                setTimeout(() => refreshUser(), 5000);
+                // Start checking payment status
+                checkPaymentStatus();
               },
             },
           ]
@@ -423,20 +443,38 @@ const checkoutUrl = await initiateCreditPurchase(10, {
 
 ## Troubleshooting
 
+**"Requested path is invalid" error after payment:**
+- This happens if the success URL points to a non-existent path
+- **Solution:** Always pass `success_url` and `cancel_url` from frontend
+- Or deploy the `payment-success` Edge Function and use it as success URL
+- The webhook still processes payment even if redirect fails
+
 **Payment not processing:**
-- Check Stripe webhook is configured correctly
+- Check Stripe webhook is configured correctly in Stripe Dashboard
+- Verify webhook events are being received (check Stripe Dashboard → Webhooks → Events)
+- Check Edge Function logs in Supabase Dashboard → Edge Functions → Logs
 - Verify `STRIPE_PRODUCTS_MAPPING` is set in Supabase secrets
-- Check Edge Function logs in Supabase Dashboard
+- Check if `STRIPE_MODE` matches your Stripe account mode (test vs live)
 
 **Credits not added:**
-- Verify webhook received `checkout.session.completed` event
-- Check `stripe_payments` table for payment record
+- **Most common:** Frontend not refreshing user data after payment
+- **Solution:** Call `refreshUser()` or refetch user profile after returning from payment
+- Verify webhook received `checkout.session.completed` event in Stripe Dashboard
+- Check `stripe_payments` table: `SELECT * FROM stripe_payments ORDER BY created_at DESC LIMIT 5;`
+- Check user credits: `SELECT id, credits FROM users_profile WHERE id = 'your_user_id';`
 - Verify user_id matches in checkout session metadata
+- Check Edge Function logs for webhook processing errors
 
 **Checkout URL not opening:**
 - Ensure `expo-linking` is installed
 - Check URL format is valid
 - Test with `Linking.canOpenURL()` first
+
+**Webhook not receiving events:**
+- Verify webhook URL is correct: `https://YOUR_PROJECT_REF.supabase.co/functions/v1/stripe-webhook`
+- Check webhook is active in Stripe Dashboard
+- Verify webhook secret matches (`STRIPE_WEBHOOK_SECRET` or `STRIPE_WEBHOOK_SECRET_SANDBOX`)
+- Test webhook by sending a test event from Stripe Dashboard
 
 ## Security Notes
 
