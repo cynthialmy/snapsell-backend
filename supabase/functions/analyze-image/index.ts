@@ -715,7 +715,7 @@ serve(async (req) => {
 
             return new Response(
                 JSON.stringify({
-                    detail: `Failed to parse model output as JSON. Raw response: ${response.substring(0, 500)}`,
+                    detail: `Failed to parse model output as JSON. Raw response: ${response ? response.substring(0, 500) : "response is undefined"}`,
                 }),
                 {
                     status: 500,
@@ -732,7 +732,7 @@ serve(async (req) => {
         if (!hasMeaningfulData) {
             console.error("LLM returned empty or invalid data:", {
                 provider,
-                rawResponse: response.substring(0, 200),
+                rawResponse: response ? response.substring(0, 200) : "response is undefined",
                 parsed,
                 listing
             });
