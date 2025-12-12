@@ -128,12 +128,14 @@ serve(async (req) => {
       }
 
       if (!quotaDecremented) {
-        // Track analytics
-        await supabaseAdmin.from("usage_logs").insert({
+        // Track analytics (non-blocking)
+        supabaseAdmin.from("usage_logs").insert({
           user_id: user.id,
           action: "generate_copy",
           meta: { blocked: true, reason: "quota_exceeded" },
-        }).catch((err) => console.error("Analytics error:", err));
+        }).then(({ error }) => {
+          if (error) console.error("Analytics error:", error);
+        });
 
         // Get quota info for error message
         const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
@@ -190,13 +192,15 @@ serve(async (req) => {
       generated_at: new Date().toISOString(),
     };
 
-    // Track analytics
+    // Track analytics (non-blocking)
     if (user) {
-      await supabaseAdmin.from("usage_logs").insert({
+      supabaseAdmin.from("usage_logs").insert({
         user_id: user.id,
         action: "generate_copy",
         meta: { storage_path: body.storage_path },
-      }).catch((err) => console.error("Analytics error:", err));
+      }).then(({ error }) => {
+        if (error) console.error("Analytics error:", error);
+      });
     }
 
     return new Response(

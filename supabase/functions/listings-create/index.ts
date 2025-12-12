@@ -129,6 +129,69 @@ serve(async (req) => {
       );
     }
 
+    // Get quota before decrementing (for logging/debugging)
+    const { data: quotaBeforeData } = await supabaseAdmin.rpc("get_user_quota", {
+      p_user_id: user.id,
+    });
+    const quotaBefore = quotaBeforeData?.[0];
+    console.log("Quota before decrement:", {
+      user_id: user.id,
+      creations_remaining_today: quotaBefore?.creations_remaining_today,
+      bonus_creations_remaining: quotaBefore?.bonus_creations_remaining,
+    });
+
+    // Check creation quota first (daily limit)
+    const { data: creationQuotaDecremented, error: creationQuotaError } = await supabaseAdmin.rpc(
+      "decrement_creation_quota",
+      {
+        p_user_id: user.id,
+        p_amount: 1,
+      }
+    );
+
+    console.log("Decrement creation quota result:", {
+      user_id: user.id,
+      decremented: creationQuotaDecremented,
+      error: creationQuotaError,
+    });
+
+    if (creationQuotaError) {
+      console.error("Creation quota check error:", creationQuotaError);
+      return new Response(
+        JSON.stringify({ error: "Failed to check creation quota", details: creationQuotaError.message }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!creationQuotaDecremented) {
+      // Get quota info for error message
+      const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
+        p_user_id: user.id,
+      });
+      const quota = quotaData?.[0];
+
+      // Track analytics (non-blocking)
+      supabaseAdmin.from("usage_logs").insert({
+        user_id: user.id,
+        action: "create_listing",
+        meta: { blocked: true, reason: "creation_quota_exceeded" },
+      }).then(({ error }) => {
+        if (error) console.error("Analytics error:", error);
+      });
+
+      return new Response(
+        JSON.stringify({
+          error: "Creation quota exceeded",
+          code: "CREATION_QUOTA_EXCEEDED",
+          creations_remaining_today: quota?.creations_remaining_today || 0,
+          bonus_creations_remaining: quota?.bonus_creations_remaining || 0,
+          message: "You've reached your daily creation limit. Purchase a pack to continue.",
+          purchase_url: "/purchases",
+        }),
+        { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Check save slots quota
     const { data: slotsDecremented, error: slotsError } = await supabaseAdmin.rpc(
       "decrement_save_slots",
@@ -140,6 +203,9 @@ serve(async (req) => {
 
     if (slotsError) {
       console.error("Save slots check error:", slotsError);
+      // Note: Creation quota already decremented, but save slots failed
+      // This is a rare edge case - log it for monitoring
+      console.error("WARNING: Creation quota decremented but save slots check failed. User:", user.id);
       return new Response(
         JSON.stringify({ error: "Failed to check save slots", details: slotsError.message }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -153,12 +219,18 @@ serve(async (req) => {
       });
       const quota = quotaData?.[0];
 
-      // Track analytics
-      await supabaseAdmin.from("usage_logs").insert({
+      // Track analytics (non-blocking)
+      supabaseAdmin.from("usage_logs").insert({
         user_id: user.id,
         action: "create_listing",
         meta: { blocked: true, reason: "save_slots_exceeded" },
-      }).catch((err) => console.error("Analytics error:", err));
+      }).then(({ error }) => {
+        if (error) console.error("Analytics error:", error);
+      });
+
+      // Note: Creation quota already decremented, but save slots exceeded
+      // This is a rare edge case - log it for monitoring
+      console.error("WARNING: Creation quota decremented but save slots exceeded. User:", user.id);
 
       return new Response(
         JSON.stringify({
@@ -242,24 +314,42 @@ serve(async (req) => {
       );
     }
 
-    // Get updated quota info
-    const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
+    // Get updated quota info after successful listing creation
+    const { data: quotaData, error: quotaFetchError } = await supabaseAdmin.rpc("get_user_quota", {
       p_user_id: user.id,
     });
+
+    if (quotaFetchError) {
+      console.error("Error fetching updated quota:", quotaFetchError);
+    }
+
     const quota = quotaData?.[0];
 
-    // Log usage
-    await supabaseAdmin.from("usage_logs").insert({
+    console.log("Quota after decrement and listing creation:", {
+      user_id: user.id,
+      creations_remaining_today: quota?.creations_remaining_today,
+      bonus_creations_remaining: quota?.bonus_creations_remaining,
+      save_slots_remaining: quota?.save_slots_remaining,
+    });
+
+    // Log usage (non-blocking)
+    supabaseAdmin.from("usage_logs").insert({
       user_id: user.id,
       action: "create_listing",
       meta: { listing_id: listing.id },
-    }).catch((err) => console.error("Analytics error:", err));
+    }).then(({ error }) => {
+      if (error) console.error("Analytics error:", error);
+    });
 
     return new Response(
       JSON.stringify({
         listing,
         quota: {
-          save_slots_remaining: quota?.save_slots_remaining || 0,
+          creations_remaining_today: quota?.creations_remaining_today ?? 0,
+          creations_daily_limit: 10, // Default daily limit for free users
+          bonus_creations_remaining: quota?.bonus_creations_remaining ?? 0,
+          save_slots_remaining: quota?.save_slots_remaining ?? 0,
+          is_pro: quota?.is_pro ?? false,
         },
       }),
       { status: 201, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -589,8 +589,8 @@ serve(async (req) => {
               .single();
 
             if (!existingPurchase) {
-              // Create purchase record if it doesn't exist
-              await supabaseAdmin
+              // Create purchase record if it doesn't exist (non-blocking)
+              supabaseAdmin
                 .from("purchases")
                 .insert({
                   user_id: userId,
@@ -606,10 +606,12 @@ serve(async (req) => {
                     type: "credits",
                   },
                 })
-                .catch((err) => console.error("Failed to create purchase record:", err));
+                .then(({ error }) => {
+                  if (error) console.error("Failed to create purchase record:", error);
+                });
             } else {
-              // Update existing purchase record with Stripe info
-              await supabaseAdmin
+              // Update existing purchase record with Stripe info (non-blocking)
+              supabaseAdmin
                 .from("purchases")
                 .update({
                   stripe_session_id: session.id,
@@ -622,7 +624,9 @@ serve(async (req) => {
                   },
                 })
                 .eq("id", existingPurchase.id)
-                .catch((err) => console.error("Failed to update purchase record:", err));
+                .then(({ error }) => {
+                  if (error) console.error("Failed to update purchase record:", error);
+                });
             }
 
             // Also update stripe_payments table for backward compatibility
@@ -633,7 +637,8 @@ serve(async (req) => {
               .single();
 
             if (pendingPayment) {
-              await supabaseAdmin
+              // Update stripe_payments (non-blocking)
+              supabaseAdmin
                 .from("stripe_payments")
                 .update({
                   status: "completed",
@@ -642,9 +647,12 @@ serve(async (req) => {
                   metadata: session.metadata || {},
                 })
                 .eq("id", pendingPayment.id)
-                .catch((err) => console.error("Failed to update stripe_payments:", err));
+                .then(({ error }) => {
+                  if (error) console.error("Failed to update stripe_payments:", error);
+                });
             } else {
-              await supabaseAdmin
+              // Insert stripe_payments (non-blocking)
+              supabaseAdmin
                 .from("stripe_payments")
                 .insert({
                   user_id: userId,
@@ -657,11 +665,13 @@ serve(async (req) => {
                   status: "completed",
                   metadata: session.metadata || {},
                 })
-                .catch((err) => console.error("Failed to insert stripe_payments:", err));
+                .then(({ error }) => {
+                  if (error) console.error("Failed to insert stripe_payments:", error);
+                });
             }
 
-            // Track analytics
-            await supabaseAdmin
+            // Track analytics (non-blocking)
+            supabaseAdmin
               .from("usage_logs")
               .insert({
                 user_id: userId,
@@ -675,7 +685,9 @@ serve(async (req) => {
                   pack_applied: true,
                 },
               })
-              .catch((err) => console.error("Analytics error:", err));
+              .then(({ error }) => {
+                if (error) console.error("Analytics error:", error);
+              });
 
             console.log(`Pack purchase complete: Applied ${sku} pack to user ${userId}`, packResult);
           } else {

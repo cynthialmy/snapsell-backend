@@ -222,12 +222,14 @@ serve(async (req) => {
       // Continue anyway - webhook will handle it
     }
 
-    // Track analytics
-    await supabaseAdmin.from("usage_logs").insert({
+    // Track analytics (non-blocking)
+    supabaseAdmin.from("usage_logs").insert({
       user_id: user.id,
       action: "purchase_credits",
       meta: { sku: body.sku, pack_purchase_initiated: true },
-    }).catch((err) => console.error("Analytics error:", err));
+    }).then(({ error }) => {
+      if (error) console.error("Analytics error:", error);
+    });
 
     return new Response(
       JSON.stringify({
