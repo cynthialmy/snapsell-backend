@@ -527,7 +527,9 @@ Create a Stripe checkout session for credit purchase or subscription.
 {
   "type": "credits",
   "credits": 10,
-  "user_id": "uuid"
+  "user_id": "uuid",
+  "success_url": "snapsell://payment/success?session_id={CHECKOUT_SESSION_ID}",  // Optional
+  "cancel_url": "snapsell://payment/cancel"  // Optional
 }
 ```
 
@@ -536,7 +538,9 @@ Create a Stripe checkout session for credit purchase or subscription.
 {
   "type": "subscription",
   "subscription_plan": "monthly",
-  "user_id": "uuid"
+  "user_id": "uuid",
+  "success_url": "snapsell://payment/success?session_id={CHECKOUT_SESSION_ID}",  // Optional
+  "cancel_url": "snapsell://payment/cancel"  // Optional
 }
 ```
 
@@ -547,6 +551,13 @@ Create a Stripe checkout session for credit purchase or subscription.
   "session_id": "cs_xxx"
 }
 ```
+
+**Note on Deep Links:**
+- `success_url` and `cancel_url` are optional
+- If not provided, defaults to Supabase project URLs
+- Custom scheme URLs (e.g., `snapsell://`) may not work in all browsers
+- Consider using Universal Links (iOS) / App Links (Android) for better reliability
+- The webhook processes payments automatically, so deep links are mainly for UX
 
 #### `GET /verify-payment`
 Verify payment status by session ID or payment intent ID.

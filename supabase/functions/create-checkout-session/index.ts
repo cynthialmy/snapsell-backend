@@ -7,6 +7,8 @@ interface CheckoutRequest {
   credits?: 10 | 25 | 60;
   subscription_plan?: "monthly" | "yearly";
   user_id: string;
+  success_url?: string; // Optional: Custom success URL (can include deep links)
+  cancel_url?: string; // Optional: Custom cancel URL (can include deep links)
 }
 
 serve(async (req) => {
@@ -95,7 +97,6 @@ serve(async (req) => {
     }
 
     // Get product/price mappings (support test/sandbox mode)
-    const stripeMode = Deno.env.get("STRIPE_MODE") || "production"; // "test" or "production"
     const mappingKey = stripeMode === "test"
       ? "STRIPE_PRODUCTS_MAPPING_SANDBOX"
       : "STRIPE_PRODUCTS_MAPPING";
@@ -111,10 +112,12 @@ serve(async (req) => {
       }
     }
 
-    // Get base URL for success/cancel URLs
+    // Get success/cancel URLs from request body or use defaults
+    // Frontend can pass deep link URLs (e.g., snapsell://payment/success?session_id={CHECKOUT_SESSION_ID})
+    // Note: Custom scheme URLs may not work in all browsers; consider using Universal Links/App Links
     const baseUrl = Deno.env.get("SUPABASE_URL")?.replace("/rest/v1", "") || "";
-    const successUrl = `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = `${baseUrl}/payment/cancel`;
+    const successUrl = body.success_url || `${baseUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = body.cancel_url || `${baseUrl}/payment/cancel`;
 
     let priceId: string | undefined;
     let metadata: Record<string, string> = {

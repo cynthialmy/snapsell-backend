@@ -57,7 +57,11 @@ interface PaymentVerificationResponse {
  * Create checkout session for credit purchase
  */
 export async function initiateCreditPurchase(
-  credits: 10 | 25 | 60
+  credits: 10 | 25 | 60,
+  options?: {
+    successUrl?: string;
+    cancelUrl?: string;
+  }
 ): Promise<string> {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) {
@@ -74,6 +78,8 @@ export async function initiateCreditPurchase(
       type: 'credits',
       credits: credits,
       user_id: session.user.id,
+      success_url: options?.successUrl,
+      cancel_url: options?.cancelUrl,
     }),
   });
 
@@ -90,7 +96,11 @@ export async function initiateCreditPurchase(
  * Create checkout session for Pro subscription
  */
 export async function initiateProSubscription(
-  plan: 'monthly' | 'yearly'
+  plan: 'monthly' | 'yearly',
+  options?: {
+    successUrl?: string;
+    cancelUrl?: string;
+  }
 ): Promise<string> {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) {
@@ -107,6 +117,8 @@ export async function initiateProSubscription(
       type: 'subscription',
       subscription_plan: plan,
       user_id: session.user.id,
+      success_url: options?.successUrl,
+      cancel_url: options?.cancelUrl,
     }),
   });
 
@@ -175,7 +187,18 @@ export function UpgradeScreen() {
   const handlePurchaseCredits = async (credits: 10 | 25 | 60) => {
     try {
       setLoading(true);
-      const checkoutUrl = await initiateCreditPurchase(credits);
+
+      // Optional: Set up deep link URLs for redirect after payment
+      // Note: Custom scheme URLs (snapsell://) may not work in all browsers
+      // Consider using Universal Links (iOS) / App Links (Android) instead
+      const deepLinkScheme = 'snapsell'; // or get from your config
+      const successUrl = `${deepLinkScheme}://payment/success?session_id={CHECKOUT_SESSION_ID}`;
+      const cancelUrl = `${deepLinkScheme}://payment/cancel`;
+
+      const checkoutUrl = await initiateCreditPurchase(credits, {
+        successUrl,
+        cancelUrl,
+      });
 
       // Open Stripe checkout in browser
       const canOpen = await Linking.canOpenURL(checkoutUrl);
@@ -207,7 +230,16 @@ export function UpgradeScreen() {
   const handleSubscribe = async (plan: 'monthly' | 'yearly') => {
     try {
       setLoading(true);
-      const checkoutUrl = await initiateProSubscription(plan);
+
+      // Optional: Set up deep link URLs for redirect after payment
+      const deepLinkScheme = 'snapsell'; // or get from your config
+      const successUrl = `${deepLinkScheme}://payment/success?session_id={CHECKOUT_SESSION_ID}`;
+      const cancelUrl = `${deepLinkScheme}://payment/cancel`;
+
+      const checkoutUrl = await initiateProSubscription(plan, {
+        successUrl,
+        cancelUrl,
+      });
 
       const canOpen = await Linking.canOpenURL(checkoutUrl);
       if (canOpen) {
@@ -355,6 +387,24 @@ useEffect(() => {
 4. **App verifies payment (optional)**
    - App can poll `verify-payment` endpoint
    - Or wait for webhook to process and refresh user data
+
+## Deep Link URLs
+
+The backend now accepts `success_url` and `cancel_url` from the frontend request. You can pass deep link URLs:
+
+```typescript
+// Example with deep links
+const checkoutUrl = await initiateCreditPurchase(10, {
+  successUrl: 'snapsell://payment/success?session_id={CHECKOUT_SESSION_ID}',
+  cancelUrl: 'snapsell://payment/cancel',
+});
+```
+
+**Important Notes:**
+- Custom scheme URLs (`snapsell://`) may not work reliably in all browsers
+- **Recommended:** Use Universal Links (iOS) / App Links (Android) instead of custom schemes
+- **Alternative:** Use a web redirect page that redirects to your deep link
+- **Fallback:** The webhook processes payments automatically; users can manually return to the app
 
 ## Testing
 
