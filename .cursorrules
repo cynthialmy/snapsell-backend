@@ -173,12 +173,11 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - Tracks analytics events: `api_analyze_requested`, `api_analyze_success`, `api_analyze_error`
 - Uses shared `corsHeaders` from `_shared/cors.ts` for consistency
 - **Quota Management:**
-  - Quota availability is checked BEFORE analysis (but not deducted)
-  - Quota is deducted ONLY AFTER successful analysis with meaningful data
-  - This prevents quota loss when LLM fails or returns empty/invalid data
-  - Returns 402 status with quota info if quota exceeded
-  - Returns 502 status if LLM fails or returns empty data (quota not deducted)
-  - On success, returns updated quota in response (similar to `/listings-create`)
+  - Analysis is FREE - quota is NOT decremented in `/analyze-image`
+  - Quota is only decremented when listing is created via `/listings-create`
+  - This allows users to preview/analyze images without consuming quota
+  - Returns current quota in response (for display purposes, not decremented)
+  - Returns 502 status if LLM fails or returns empty/invalid data
 - **Response Format:** Unauthenticated users receive ListingData only. Authenticated users receive `{ ...ListingData, quota: {...} }` with updated quota information.
 - **Validation:** Validates that LLM response contains meaningful data (at least a title). Returns error if analysis fails or returns empty data.
 - **Logging:** Added detailed logging for LLM responses to help debug analysis failures.

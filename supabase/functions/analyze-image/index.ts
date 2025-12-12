@@ -17,19 +17,18 @@
  * Response:
  * - For unauthenticated users: Returns ListingData only
  * - For authenticated users: Returns { ...ListingData, quota: {...} }
- *   - Quota is checked before analysis (but not deducted)
- *   - Quota is deducted ONLY after successful analysis with meaningful data
- *   - Updated quota is returned in the response
+ *   - Current quota is returned (but NOT decremented)
+ *   - Quota is only decremented when listing is created via /listings-create
  *
  * Rate Limits:
  * - Unauthenticated: 10 requests/hour, 5 requests/15 minutes
  * - Authenticated: 50 requests/hour
  *
  * Quota:
- * - Authenticated users: Quota availability is checked before analysis
- * - Quota is deducted ONLY after successful analysis (prevents quota loss on LLM failures)
- * - Returns 402 status with quota info if quota exceeded
- * - Returns 502 status if LLM fails or returns empty/invalid data (quota not deducted)
+ * - Analysis is FREE - quota is NOT decremented here
+ * - Quota is only decremented when listing is created via /listings-create
+ * - This allows users to preview/analyze images without consuming quota
+ * - Returns 502 status if LLM fails or returns empty/invalid data
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -585,58 +584,9 @@ serve(async (req) => {
             rateLimitHeaders = getRateLimitHeaders(hourlyResult);
         }
 
-        // If authenticated, check quota availability (but don't decrement yet - only after successful analysis)
-        if (userId && supabaseUrl && supabaseServiceRoleKey) {
-            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
-            const { data: quotaData, error: quotaError } = await supabaseAdmin.rpc("get_user_quota", {
-                p_user_id: userId,
-            });
-
-            if (quotaError) {
-                console.error("Quota check error:", quotaError);
-                return new Response(
-                    JSON.stringify({
-                        error: "Failed to check creation quota",
-                        details: quotaError.message
-                    }),
-                    {
-                        status: 500,
-                        headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" }
-                    }
-                );
-            }
-
-            const quota = quotaData?.[0];
-            const totalCreationsRemaining = (quota?.creations_remaining_today ?? 0) + (quota?.bonus_creations_remaining ?? 0);
-
-            if (totalCreationsRemaining < 1) {
-                // Track analytics (non-blocking)
-                supabaseAdmin.from("usage_logs").insert({
-                    user_id: userId,
-                    action: "analyze_image",
-                    meta: { blocked: true, reason: "creation_quota_exceeded" },
-                }).then(({ error }) => {
-                    if (error) console.error("Analytics error:", error);
-                });
-
-                await trackEvent("api_analyze_error", { provider, error_type: "quota_exceeded" }, distinctId);
-
-                return new Response(
-                    JSON.stringify({
-                        error: "Creation quota exceeded",
-                        code: "CREATION_QUOTA_EXCEEDED",
-                        creations_remaining_today: quota?.creations_remaining_today || 0,
-                        bonus_creations_remaining: quota?.bonus_creations_remaining || 0,
-                        message: "You've reached your daily creation limit. Purchase a pack to continue.",
-                        purchase_url: "/purchases",
-                    }),
-                    {
-                        status: 402,
-                        headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" }
-                    }
-                );
-            }
-        }
+        // NOTE: We do NOT check quota here - analysis is free (rate-limited only)
+        // Quota is only checked and decremented when the listing is actually created via /listings-create
+        // This allows users to preview/analyze images without consuming quota
 
         // Convert image to bytes
         const imageBytes = new Uint8Array(await imageFile.arrayBuffer());
@@ -818,50 +768,9 @@ serve(async (req) => {
             );
         }
 
-        // If authenticated, decrement quota AFTER successful analysis
-        if (userId && supabaseUrl && supabaseServiceRoleKey) {
-            console.log(`[Quota] Decrementing quota for user ${userId} after successful analysis`);
-            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
-
-            // Get quota before decrement for logging
-            const { data: quotaBeforeData } = await supabaseAdmin.rpc("get_user_quota", {
-                p_user_id: userId,
-            });
-            const quotaBefore = quotaBeforeData?.[0];
-            console.log(`[Quota] Before decrement:`, {
-                creations_remaining_today: quotaBefore?.creations_remaining_today,
-                bonus_creations_remaining: quotaBefore?.bonus_creations_remaining,
-            });
-
-            const { data: quotaDecremented, error: quotaDecrementError } = await supabaseAdmin.rpc(
-                "decrement_creation_quota",
-                {
-                    p_user_id: userId,
-                    p_amount: 1,
-                }
-            );
-
-            console.log(`[Quota] Decrement result:`, {
-                userId,
-                quotaDecremented,
-                error: quotaDecrementError,
-                errorMessage: quotaDecrementError?.message,
-                errorCode: quotaDecrementError?.code,
-            });
-
-            if (quotaDecrementError) {
-                console.error("[Quota] Decrement error after successful analysis:", JSON.stringify(quotaDecrementError, null, 2));
-                // Don't fail the request - analysis succeeded, but log the error
-            } else if (!quotaDecremented) {
-                console.error("[Quota] Decrement returned false after successful analysis - quota may have been exhausted between check and decrement");
-                // This could happen if quota was exhausted between the check and decrement
-                // But don't fail the request since analysis succeeded
-            } else {
-                console.log(`[Quota] Successfully decremented for user ${userId}`);
-            }
-        } else {
-            console.log(`[Quota] Skipping decrement - userId: ${userId}, hasUrl: ${!!supabaseUrl}, hasServiceKey: ${!!supabaseServiceRoleKey}`);
-        }
+        // NOTE: We do NOT decrement quota here - quota is only decremented when the listing is actually created via /listings-create
+        // This allows users to analyze/preview images without consuming quota
+        // Quota is only consumed when they decide to create the listing
 
         // Track success
         await trackEvent(
@@ -870,7 +779,8 @@ serve(async (req) => {
             distinctId
         );
 
-        // Get updated quota info after successful analysis and decrement (for authenticated users)
+        // Get current quota info (for authenticated users) - quota is NOT decremented here
+        // Quota is only decremented when listing is created via /listings-create
         let quota: any = null;
         if (userId && supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
@@ -879,10 +789,10 @@ serve(async (req) => {
             });
 
             if (quotaFetchError) {
-                console.error("[Quota] Error fetching updated quota:", JSON.stringify(quotaFetchError, null, 2));
+                console.error("[Quota] Error fetching quota:", JSON.stringify(quotaFetchError, null, 2));
             } else {
                 quota = quotaData?.[0];
-                console.log(`[Quota] After decrement:`, {
+                console.log(`[Quota] Current quota (not decremented - only decremented on listing creation):`, {
                     creations_remaining_today: quota?.creations_remaining_today,
                     bonus_creations_remaining: quota?.bonus_creations_remaining,
                 });
