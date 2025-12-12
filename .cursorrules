@@ -161,6 +161,8 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 [X] Implement error handling (quota, authentication, parsing errors)
 [X] Implement PostHog analytics tracking (non-blocking)
 [X] Use shared CORS headers from `_shared/cors.ts` to match project patterns
+[X] Implement creation quota deduction for authenticated users
+[X] Return updated quota in response (matching `/listings-create` pattern)
 
 **Key Implementation Details:**
 - Location: `supabase/functions/analyze-image/index.ts`
@@ -170,6 +172,8 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - Handles markdown code blocks and extra text in LLM responses
 - Tracks analytics events: `api_analyze_requested`, `api_analyze_success`, `api_analyze_error`
 - Uses shared `corsHeaders` from `_shared/cors.ts` for consistency
+- **Quota Management:** For authenticated users, creation quota is deducted before analysis. Returns 402 status with quota info if quota exceeded. On success, returns updated quota in response (similar to `/listings-create`).
+- **Response Format:** Unauthenticated users receive ListingData only. Authenticated users receive `{ ...ListingData, quota: {...} }` with updated quota information.
 
 **Next Steps:**
 - Set up environment variables in Supabase Dashboard (LLM API keys, PostHog config)

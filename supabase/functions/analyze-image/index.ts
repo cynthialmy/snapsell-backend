@@ -14,9 +14,19 @@
  * - model (string, optional): Specific model to use (default: provider-specific)
  * - currency (string, optional): Currency code for price estimation (e.g., "USD", "EUR")
  *
+ * Response:
+ * - For unauthenticated users: Returns ListingData only
+ * - For authenticated users: Returns { ...ListingData, quota: {...} }
+ *   - Quota is deducted before analysis (creation quota)
+ *   - Updated quota is returned in the response
+ *
  * Rate Limits:
  * - Unauthenticated: 10 requests/hour, 5 requests/15 minutes
  * - Authenticated: 50 requests/hour
+ *
+ * Quota:
+ * - Authenticated users: Creation quota is deducted before analysis
+ * - Returns 402 status with quota info if quota exceeded
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -565,6 +575,66 @@ serve(async (req) => {
             rateLimitHeaders = getRateLimitHeaders(hourlyResult);
         }
 
+        // If authenticated, check and decrement creation quota before analyzing
+        if (userId && supabaseUrl && supabaseServiceRoleKey) {
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const { data: quotaDecremented, error: quotaError } = await supabaseAdmin.rpc(
+                "decrement_creation_quota",
+                {
+                    p_user_id: userId,
+                    p_amount: 1,
+                }
+            );
+
+            if (quotaError) {
+                console.error("Creation quota check error:", quotaError);
+                return new Response(
+                    JSON.stringify({
+                        error: "Failed to check creation quota",
+                        details: quotaError.message
+                    }),
+                    {
+                        status: 500,
+                        headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" }
+                    }
+                );
+            }
+
+            if (!quotaDecremented) {
+                // Get quota info for error message
+                const { data: quotaData } = await supabaseAdmin.rpc("get_user_quota", {
+                    p_user_id: userId,
+                });
+                const quota = quotaData?.[0];
+
+                // Track analytics (non-blocking)
+                supabaseAdmin.from("usage_logs").insert({
+                    user_id: userId,
+                    action: "analyze_image",
+                    meta: { blocked: true, reason: "creation_quota_exceeded" },
+                }).then(({ error }) => {
+                    if (error) console.error("Analytics error:", error);
+                });
+
+                await trackEvent("api_analyze_error", { provider, error_type: "quota_exceeded" }, distinctId);
+
+                return new Response(
+                    JSON.stringify({
+                        error: "Creation quota exceeded",
+                        code: "CREATION_QUOTA_EXCEEDED",
+                        creations_remaining_today: quota?.creations_remaining_today || 0,
+                        bonus_creations_remaining: quota?.bonus_creations_remaining || 0,
+                        message: "You've reached your daily creation limit. Purchase a pack to continue.",
+                        purchase_url: "/purchases",
+                    }),
+                    {
+                        status: 402,
+                        headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" }
+                    }
+                );
+            }
+        }
+
         // Convert image to bytes
         const imageBytes = new Uint8Array(await imageFile.arrayBuffer());
         const mimeType = imageFile.type || "image/jpeg";
@@ -701,8 +771,35 @@ serve(async (req) => {
             distinctId
         );
 
+        // Get updated quota info after successful analysis (for authenticated users)
+        let quota: any = null;
+        if (userId && supabaseUrl && supabaseServiceRoleKey) {
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const { data: quotaData, error: quotaFetchError } = await supabaseAdmin.rpc("get_user_quota", {
+                p_user_id: userId,
+            });
+
+            if (quotaFetchError) {
+                console.error("Error fetching updated quota:", quotaFetchError);
+            } else {
+                quota = quotaData?.[0];
+            }
+        }
+
+        // Build response with listing and quota (if authenticated)
+        const responseData: any = listing;
+        if (quota) {
+            responseData.quota = {
+                creations_remaining_today: quota.creations_remaining_today ?? 0,
+                creations_daily_limit: 10, // Default daily limit for free users
+                bonus_creations_remaining: quota.bonus_creations_remaining ?? 0,
+                save_slots_remaining: quota.save_slots_remaining ?? 0,
+                is_pro: quota.is_pro ?? false,
+            };
+        }
+
         return new Response(
-            JSON.stringify(listing),
+            JSON.stringify(responseData),
             {
                 status: 200,
                 headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
