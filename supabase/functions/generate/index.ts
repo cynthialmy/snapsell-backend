@@ -106,6 +106,65 @@ serve(async (req) => {
       return createRateLimitErrorResponse(rateLimitResult, corsHeaders);
     }
 
+    // If not authenticated, check anonymous daily creation limit
+    if (!user) {
+      const forwardedFor = req.headers.get("x-forwarded-for");
+      const realIp = req.headers.get("x-real-ip");
+      const ipAddress = forwardedFor
+        ? forwardedFor.split(",")[0].trim()
+        : realIp || "unknown";
+
+      const { data: dailyLimitCheck, error: dailyLimitError } = await supabaseAdmin.rpc(
+        "check_anonymous_daily_creation_limit",
+        {
+          p_ip_address: ipAddress,
+          p_daily_limit: 10,
+        }
+      );
+
+      if (dailyLimitError) {
+        console.error("Anonymous daily limit check error:", dailyLimitError);
+        // Fail open - allow the request but log the error
+      } else if (dailyLimitCheck === false) {
+        // Get quota info for error message
+        const { data: quotaData } = await supabaseAdmin.rpc("get_anonymous_daily_quota", {
+          p_ip_address: ipAddress,
+        });
+        const quota = quotaData?.[0];
+
+        return new Response(
+          JSON.stringify({
+            error: "Daily creation limit exceeded",
+            code: "ANONYMOUS_DAILY_LIMIT_EXCEEDED",
+            message: "You've reached your daily creation limit. Sign in for higher limits or try again tomorrow.",
+            creations_remaining_today: quota?.creations_remaining_today || 0,
+            creations_daily_limit: quota?.creations_daily_limit || 10,
+            resets_at: quota?.reset_at,
+          }),
+          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // Track the creation in rate_limits for daily tracking (using daily window)
+      // This ensures the creation is counted toward the daily limit
+      const dailyIdentifier = `ip:${ipAddress}`;
+
+      // Use rate limit tracking with 1440 minute window (24 hours) for daily tracking
+      // This will increment the count in rate_limits table for daily tracking
+      // IMPORTANT: Check the result - if rate limit exceeded, reject the request
+      const rateLimitResult = await checkRateLimit(
+        supabaseAdmin,
+        dailyIdentifier,
+        "generate",
+        10, // Daily limit
+        1440 // 24 hours in minutes
+      );
+
+      if (!rateLimitResult.allowed) {
+        return createRateLimitErrorResponse(rateLimitResult, corsHeaders);
+      }
+    }
+
     // If authenticated, check quota
     if (user) {
       const { data: quotaDecremented, error: quotaError } = await supabaseAdmin.rpc(

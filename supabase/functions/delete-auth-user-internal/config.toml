@@ -1,2 +1,3 @@
 [functions.delete-auth-user-internal]
 verify_jwt = false
+

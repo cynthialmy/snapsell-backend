@@ -65,3 +65,4 @@ CREATE TRIGGER on_users_profile_deleted
 -- 3. Pass the service role key in the Authorization header
 -- Note: This requires storing the Supabase URL and service role key securely (e.g., in Vault)
 
+

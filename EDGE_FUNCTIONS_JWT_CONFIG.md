@@ -148,3 +148,4 @@ If you get 401 errors:
    ```bash
    supabase functions logs [function-name]
    ```
+

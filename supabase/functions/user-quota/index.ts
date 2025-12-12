@@ -102,15 +102,36 @@ serve(async (req) => {
       resetDate.setUTCDate(resetDate.getUTCDate() + 1);
     }
 
+    // Calculate purchased save slots (total - free 10)
+    const freeSaveSlots = 10;
+    const purchasedSaveSlots = Math.max(0, quota.save_slots_remaining - freeSaveSlots);
+
+    // Calculate total creations remaining (daily + bonus)
+    const totalCreationsRemaining = quota.creations_remaining_today + quota.bonus_creations_remaining;
+
     return new Response(
       JSON.stringify({
         user_id: user.id,
         is_pro: quota.is_pro,
+        // Detailed breakdown for creations
+        creations: {
+          free_remaining_today: quota.creations_remaining_today,
+          purchased_remaining: quota.bonus_creations_remaining,
+          total_remaining: totalCreationsRemaining,
+          daily_limit: 10,
+        },
+        // Detailed breakdown for saves
+        saves: {
+          free_slots: Math.min(freeSaveSlots, quota.save_slots_remaining),
+          purchased_slots: purchasedSaveSlots,
+          total_slots: quota.save_slots_remaining,
+        },
+        // Legacy fields for backward compatibility
         creations_remaining_today: quota.creations_remaining_today,
         creations_daily_limit: 10,
         bonus_creations_remaining: quota.bonus_creations_remaining,
         save_slots_remaining: quota.save_slots_remaining,
-        free_save_slots: 10,
+        free_save_slots: freeSaveSlots,
         resets_at: resetDate.toISOString(),
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
