@@ -39,6 +39,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import {
     checkRateLimit,
+    checkRateLimitReadonly,
     getRateLimitHeaders,
     getRateLimitIdentifier,
     createRateLimitErrorResponse,
@@ -72,8 +73,8 @@ const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL_DEPLOYMENT") || "gpt-4o";
 
 const AZURE_OPENAI_API_KEY = Deno.env.get("AZURE_OPENAI_API_KEY");
 const AZURE_OPENAI_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT");
-const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION") || "2024-08-01-preview";
-const AZURE_OPENAI_MODEL = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "gpt-4o-ms";
+const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION") || "2024-05-01-preview";
+const AZURE_OPENAI_MODEL = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "gpt-5-mini";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 const ANTHROPIC_MODEL = "claude-3-7-sonnet-20250219";
@@ -132,18 +133,22 @@ function buildPromptTemplate(currency?: string): string {
 Analyze the attached product photo and return ONLY valid JSON (no markdown, no code blocks, no explanations) matching this exact schema:
 
 {
-  "title": string,          // short, searchable product headline
-  "price": string,          // numeric price, no currency symbol
+  "title": string,          // REQUIRED: short, searchable product headline (e.g., "Vintage Wooden Chair" or "iPhone 12 Pro Max")
+  "price": string,          // numeric price, no currency symbol (empty string if cannot estimate)
   "description": string,    // 2-3 concise sentences with key selling points
   "condition": string,      // one of: "New", "Used - Like New", "Used - Good", "Used - Fair", "Refurbished"
   "location": string        // city or neighborhood if inferable, otherwise empty string
 }
 
-Rules:
-- Return ONLY the JSON object, nothing else. No markdown code blocks, no explanations, no text before or after.${currencyContext}
+CRITICAL REQUIREMENTS:
+- The "title" field is MANDATORY and must never be empty. You must always provide a descriptive title based on what you see in the image.
+- Return ONLY the JSON object, nothing else. No markdown code blocks, no explanations, no text before or after.
+- Use double quotes for all JSON strings (not single quotes).
+- All string values must be properly escaped if they contain quotes.${currencyContext}
 - Keep description under 400 characters.
 - Prefer realistic consumer-friendly language.
-- If you cannot infer a field, return an empty string for that field.`;
+- If you cannot infer optional fields (price, location), return an empty string for those fields only.
+- You must always provide at least: title, description, and condition.`;
 }
 
 function normalizeListing(payload: any): ListingData {
@@ -191,7 +196,48 @@ function extractJsonFromResponse(response: string): string {
         jsonText = jsonText.substring(startIdx, endIdx + 1);
     }
 
-    return jsonText.trim();
+    // Try to parse as-is first
+    try {
+        JSON.parse(jsonText);
+        return jsonText.trim(); // Already valid JSON
+    } catch (e) {
+        // JSON is invalid, try to fix common issues
+        // The most common issue is single quotes instead of double quotes
+        // We'll do a simple replacement for common patterns
+
+        let fixed = jsonText;
+
+        // Fix keys: 'key': -> "key":
+        fixed = fixed.replace(/'([a-zA-Z_][a-zA-Z0-9_]*)':/g, '"$1":');
+
+        // Fix values: : 'value' -> : "value" (but handle empty strings specially)
+        // Pattern: : '' -> : ""
+        fixed = fixed.replace(/:\s*''/g, ': ""');
+        // Pattern: : '...' -> : "..." (for non-empty strings)
+        // Use a more careful regex that handles escaped quotes
+        fixed = fixed.replace(/:\s*'((?:[^'\\]|\\.)*)'/g, ': "$1"');
+
+        // Try parsing the fixed version
+        try {
+            JSON.parse(fixed);
+            return fixed.trim();
+        } catch (e2) {
+            // If still invalid, try one more approach: replace all single quotes with double quotes
+            // This is a last resort and might break strings with apostrophes, but it's better than failing
+            let lastResort = jsonText;
+            // Only replace single quotes that are clearly delimiters (not in the middle of words)
+            // Pattern: whitespace or : followed by ' and ending with ' followed by , or } or whitespace
+            lastResort = lastResort.replace(/([{,:\s])'([^']*)'([,}\s])/g, '$1"$2"$3');
+
+            try {
+                JSON.parse(lastResort);
+                return lastResort.trim();
+            } catch (e3) {
+                // Give up and return original - let the error handler deal with it
+                return jsonText.trim();
+            }
+        }
+    }
 }
 
 function trackEvent(
@@ -492,36 +538,68 @@ serve(async (req) => {
             const identifier = getRateLimitIdentifier(req, userId);
             console.log(`[Analyze-Image] Rate limit identifier: ${identifier}`);
 
-            // Rate limits:
-            // - Unauthenticated: 10 per hour (60 minutes), 5 per 15 minutes
-            // - Authenticated: 50 per hour
-            const hourlyLimit = userId ? 50 : 10;
-            const hourlyWindow = 60;
-
-            // Check hourly limit first
-            console.log(`[Analyze-Image] Checking hourly rate limit (limit: ${hourlyLimit}, window: ${hourlyWindow}min)`);
-            const hourlyResult = await checkRateLimit(
-                supabaseAdmin,
-                identifier,
-                "analyze-image",
-                hourlyLimit,
-                hourlyWindow
-            );
-            console.log(`[Analyze-Image] Hourly rate limit result:`, {
-                allowed: hourlyResult.allowed,
-                remaining: hourlyResult.remaining,
-                resetAt: hourlyResult.resetAt.toISOString(),
-            });
-
-            if (!hourlyResult.allowed) {
-                console.log(`[Analyze-Image] Rate limit exceeded, returning 429 response`);
-                // Track event non-blocking
-                trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
-                return createRateLimitErrorResponse(hourlyResult, corsHeaders);
-            }
-
-            // For unauthenticated users, also check 15-minute window (5 requests)
+            // For unauthenticated users: Check daily quota FIRST (business limit)
+            // Then check hourly/15-min rate limits (abuse prevention)
             if (!userId) {
+                // Check daily quota FIRST - this is the actual feature limit (10 per day)
+                // Use readonly check to avoid incrementing on failed requests
+                console.log(`[Analyze-Image] Checking daily quota for unauthenticated user (10 per day)`);
+                const dailyQuotaResult = await checkRateLimitReadonly(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-daily",
+                    10,
+                    1440 // 24 hours in minutes
+                );
+                console.log(`[Analyze-Image] Daily quota result:`, {
+                    allowed: dailyQuotaResult.allowed,
+                    remaining: dailyQuotaResult.remaining,
+                    resetAt: dailyQuotaResult.resetAt.toISOString(),
+                });
+
+                if (!dailyQuotaResult.allowed) {
+                    console.log(`[Analyze-Image] Daily quota exceeded, returning 402 response`);
+                    trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
+                    try {
+                        const rateLimitHeaders = getRateLimitHeaders(dailyQuotaResult);
+                        return new Response(
+                            JSON.stringify({
+                                error: "Daily creation limit exceeded",
+                                code: "ANONYMOUS_DAILY_LIMIT_EXCEEDED",
+                                message: "You've reached your daily creation limit (10 per day). Sign in for higher limits or try again tomorrow.",
+                                creations_remaining_today: dailyQuotaResult.remaining,
+                                creations_daily_limit: 10,
+                                resets_at: dailyQuotaResult.resetAt.toISOString(),
+                            }),
+                            {
+                                status: 402,
+                                headers: {
+                                    ...corsHeaders,
+                                    ...rateLimitHeaders,
+                                    "Content-Type": "application/json",
+                                },
+                            }
+                        );
+                    } catch (error: any) {
+                        console.error(`[Analyze-Image] Error creating daily quota exceeded response:`, error);
+                        return new Response(
+                            JSON.stringify({
+                                error: "Daily creation limit exceeded",
+                                code: "ANONYMOUS_DAILY_LIMIT_EXCEEDED",
+                                message: "You've reached your daily creation limit (10 per day). Sign in for higher limits or try again tomorrow.",
+                                creations_remaining_today: dailyQuotaResult.remaining,
+                                creations_daily_limit: 10,
+                                resets_at: dailyQuotaResult.resetAt.toISOString(),
+                            }),
+                            {
+                                status: 402,
+                                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                            }
+                        );
+                    }
+                }
+
+                // Then check 15-minute window (5 requests) - abuse prevention
                 console.log(`[Analyze-Image] Checking 15-minute rate limit for unauthenticated user`);
                 const shortWindowResult = await checkRateLimit(
                     supabaseAdmin,
@@ -537,48 +615,65 @@ serve(async (req) => {
 
                 if (!shortWindowResult.allowed) {
                     console.log(`[Analyze-Image] 15-minute rate limit exceeded, returning 429 response`);
-                    // Track event non-blocking (don't await)
-                    trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId).catch(err => {
-                        console.error("[Analyze-Image] Failed to track rate limit event:", err);
-                    });
-                    return createRateLimitErrorResponse(shortWindowResult, corsHeaders);
+                    trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                    try {
+                        return createRateLimitErrorResponse(shortWindowResult, corsHeaders);
+                    } catch (error: any) {
+                        console.error(`[Analyze-Image] Error creating rate limit response:`, error);
+                        return new Response(
+                            JSON.stringify({
+                                error: "Rate limit exceeded. Please try again later.",
+                                code: "RATE_LIMIT_EXCEEDED",
+                                remaining: shortWindowResult.remaining,
+                                limit: shortWindowResult.limit,
+                            }),
+                            {
+                                status: 429,
+                                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                            }
+                        );
+                    }
                 }
+            }
 
-                // Check daily quota for unauthenticated users (10 per day)
-                console.log(`[Analyze-Image] Checking daily quota for unauthenticated user (10 per day)`);
-                const dailyQuotaResult = await checkRateLimit(
-                    supabaseAdmin,
-                    identifier,
-                    "analyze-image-daily",
-                    10,
-                    1440 // 24 hours in minutes
-                );
-                console.log(`[Analyze-Image] Daily quota result:`, {
-                    allowed: dailyQuotaResult.allowed,
-                    remaining: dailyQuotaResult.remaining,
-                    resetAt: dailyQuotaResult.resetAt.toISOString(),
-                });
+            // Check hourly limit (for both authenticated and unauthenticated)
+            // Rate limits:
+            // - Unauthenticated: 10 per hour (60 minutes)
+            // - Authenticated: 50 per hour
+            const hourlyLimit = userId ? 50 : 10;
+            const hourlyWindow = 60;
 
-                if (!dailyQuotaResult.allowed) {
-                    console.log(`[Analyze-Image] Daily quota exceeded, returning 402 response`);
-                    // Track event non-blocking
-                    trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
+            console.log(`[Analyze-Image] Checking hourly rate limit (limit: ${hourlyLimit}, window: ${hourlyWindow}min)`);
+            const hourlyResult = await checkRateLimit(
+                supabaseAdmin,
+                identifier,
+                "analyze-image",
+                hourlyLimit,
+                hourlyWindow
+            );
+            console.log(`[Analyze-Image] Hourly rate limit result:`, {
+                allowed: hourlyResult.allowed,
+                remaining: hourlyResult.remaining,
+                resetAt: hourlyResult.resetAt.toISOString(),
+            });
+
+            if (!hourlyResult.allowed) {
+                console.log(`[Analyze-Image] Hourly rate limit exceeded, returning 429 response`);
+                trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                try {
+                    return createRateLimitErrorResponse(hourlyResult, corsHeaders);
+                } catch (error: any) {
+                    console.error(`[Analyze-Image] Error creating hourly rate limit response:`, error);
                     return new Response(
                         JSON.stringify({
-                            error: "Daily creation limit exceeded",
-                            code: "ANONYMOUS_DAILY_LIMIT_EXCEEDED",
-                            message: "You've reached your daily creation limit (10 per day). Sign in for higher limits or try again tomorrow.",
-                            creations_remaining_today: dailyQuotaResult.remaining,
-                            creations_daily_limit: 10,
-                            resets_at: dailyQuotaResult.resetAt.toISOString(),
+                            error: "Rate limit exceeded. Please try again later or sign in for higher limits.",
+                            code: "RATE_LIMIT_EXCEEDED",
+                            remaining: hourlyResult.remaining,
+                            limit: hourlyResult.limit,
                         }),
                         {
-                            status: 402,
-                            headers: {
-                                ...corsHeaders,
-                                ...getRateLimitHeaders(dailyQuotaResult),
-                                "Content-Type": "application/json",
-                            },
+                            status: 429,
+                            headers: { ...corsHeaders, "Content-Type": "application/json" },
                         }
                     );
                 }
@@ -968,10 +1063,21 @@ serve(async (req) => {
                 hasTitle: !!parsed.title,
                 hasPrice: !!parsed.price,
                 hasDescription: !!parsed.description,
+                hasCondition: !!parsed.condition,
+                hasLocation: !!parsed.location,
+                titleValue: parsed.title || "(empty)",
+                priceValue: parsed.price || "(empty)",
                 keys: Object.keys(parsed)
             });
-        } catch (e) {
-            console.error(`JSON parse error:`, e, `Raw JSON text:`, jsonText.substring(0, 500));
+        } catch (e: any) {
+            console.error(`JSON parse error:`, {
+                error: e.message || e,
+                errorType: e.constructor?.name,
+                rawResponse: response ? response.substring(0, 500) : "response is undefined",
+                extractedJson: jsonText ? jsonText.substring(0, 500) : "jsonText is undefined",
+                jsonTextLength: jsonText?.length || 0
+            });
+
             // Get rate limit headers
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
@@ -990,10 +1096,12 @@ serve(async (req) => {
 
             return new Response(
                 JSON.stringify({
-                    detail: `Failed to parse model output as JSON. Raw response: ${response ? response.substring(0, 500) : "response is undefined"}`,
+                    detail: `Failed to parse model output as JSON. The vision model may have returned invalid JSON. Please try again with a clearer image.`,
+                    code: "JSON_PARSE_ERROR",
+                    raw_preview: response ? response.substring(0, 200) : "response is undefined"
                 }),
                 {
-                    status: 500,
+                    status: 502,
                     headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
                 }
             );
@@ -1003,8 +1111,12 @@ serve(async (req) => {
         const listing = normalizeListing(parsed);
 
         // Validate that we got meaningful data from the LLM
-        const hasMeaningfulData = listing.title && listing.title.trim().length > 0;
-        if (!hasMeaningfulData) {
+        // Require at least title and description to be non-empty
+        const hasTitle = listing.title && listing.title.trim().length > 0;
+        const hasDescription = listing.description && listing.description.trim().length > 0;
+        const hasCondition = listing.condition && listing.condition.trim().length > 0;
+
+        if (!hasTitle || !hasDescription || !hasCondition) {
             console.error("[Analyze-Image] LLM returned empty or invalid data:", {
                 provider,
                 model: model || "default",
@@ -1013,11 +1125,26 @@ serve(async (req) => {
                 extractedJson: jsonText ? jsonText.substring(0, 500) : "jsonText is undefined",
                 parsed,
                 listing,
-                hasTitle: !!listing.title,
-                titleLength: listing.title?.length || 0,
+                validation: {
+                    hasTitle,
+                    hasDescription,
+                    hasCondition,
+                    titleValue: listing.title || "(empty)",
+                    descriptionValue: listing.description ? listing.description.substring(0, 100) + "..." : "(empty)",
+                    conditionValue: listing.condition || "(empty)",
+                }
             });
 
-            trackEvent("api_analyze_error", { provider, error_type: "invalid_data", model: model || "default" }, distinctId);
+            trackEvent("api_analyze_error", {
+                provider,
+                error_type: "invalid_data",
+                model: model || "default",
+                missing_fields: {
+                    title: !hasTitle,
+                    description: !hasDescription,
+                    condition: !hasCondition
+                }
+            }, distinctId);
 
             // Get rate limit headers for error response
             let rateLimitHeaders: Record<string, string> = {};
@@ -1035,11 +1162,19 @@ serve(async (req) => {
                 rateLimitHeaders = getRateLimitHeaders(hourlyResult);
             }
 
+            // Provide more specific error message
+            const missingFields: string[] = [];
+            if (!hasTitle) missingFields.push("title");
+            if (!hasDescription) missingFields.push("description");
+            if (!hasCondition) missingFields.push("condition");
+
             return new Response(
                 JSON.stringify({
                     error: "Image analysis failed",
-                    detail: "The vision model did not return valid listing data. Please try again with a clearer image.",
-                    code: "ANALYSIS_FAILED"
+                    detail: `The vision model did not return valid listing data. Missing required fields: ${missingFields.join(", ")}. This may happen if the image is unclear, contains no recognizable product, or the model cannot analyze it. Please try again with a clearer image of a product.`,
+                    code: "ANALYSIS_FAILED",
+                    missing_fields: missingFields,
+                    provider
                 }),
                 {
                     status: 502,
@@ -1096,9 +1231,10 @@ serve(async (req) => {
                     console.log(`[Analyze-Image] Successfully decremented creation quota for user ${userId}`);
                 }
             } else {
-                // Unauthenticated users: track daily quota usage
+                // Unauthenticated users: track daily quota usage AFTER successful analysis
                 console.log(`[Analyze-Image] Tracking daily quota usage for anonymous user (IP: ${identifier})`);
                 // Increment daily quota tracking (1440 minute window = 24 hours)
+                // This is the ONLY place we increment daily quota for unauthenticated users
                 const dailyQuotaResult = await checkRateLimit(
                     supabaseAdmin,
                     identifier,
@@ -1121,9 +1257,12 @@ serve(async (req) => {
             distinctId
         );
 
-        // Get updated quota info after successful analysis and decrement (for authenticated users)
+        // Get updated quota info after successful analysis and decrement
         let quota: any = null;
+        let dailyQuotaInfo: { remaining: number; limit: number; resetAt: Date } | null = null;
+
         if (userId && supabaseUrl && supabaseServiceRoleKey) {
+            // Authenticated users: get user quota
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
             const { data: quotaData, error: quotaFetchError } = await supabaseAdmin.rpc("get_user_quota", {
                 p_user_id: userId,
@@ -1138,17 +1277,45 @@ serve(async (req) => {
                     bonus_creations_remaining: quota?.bonus_creations_remaining,
                 });
             }
+        } else if (supabaseUrl && supabaseServiceRoleKey) {
+            // Unauthenticated users: get daily quota info
+            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const identifier = getRateLimitIdentifier(req, userId);
+            const dailyQuotaResult = await checkRateLimit(
+                supabaseAdmin,
+                identifier,
+                "analyze-image-daily",
+                10,
+                1440 // 24 hours in minutes
+            );
+            dailyQuotaInfo = {
+                remaining: dailyQuotaResult.remaining,
+                limit: dailyQuotaResult.limit,
+                resetAt: dailyQuotaResult.resetAt,
+            };
+            console.log(`[Analyze-Image] Daily quota info for unauthenticated user:`, dailyQuotaInfo);
         }
 
-        // Build response with listing and quota (if authenticated)
+        // Build response with listing and quota
         const responseData: any = listing;
         if (quota) {
+            // Authenticated user quota
             responseData.quota = {
                 creations_remaining_today: quota.creations_remaining_today ?? 0,
                 creations_daily_limit: 10, // Default daily limit for free users
                 bonus_creations_remaining: quota.bonus_creations_remaining ?? 0,
                 save_slots_remaining: quota.save_slots_remaining ?? 0,
                 is_pro: quota.is_pro ?? false,
+            };
+        } else if (dailyQuotaInfo) {
+            // Unauthenticated user daily quota
+            responseData.quota = {
+                creations_remaining_today: dailyQuotaInfo.remaining,
+                creations_daily_limit: dailyQuotaInfo.limit,
+                bonus_creations_remaining: 0,
+                save_slots_remaining: 0,
+                is_pro: false,
+                resets_at: dailyQuotaInfo.resetAt.toISOString(),
             };
         }
 

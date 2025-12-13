@@ -22,7 +22,65 @@ export interface RateLimitHeaders {
 }
 
 /**
- * Check rate limit for a given identifier and endpoint
+ * Check rate limit for a given identifier and endpoint (READ-ONLY - doesn't increment)
+ * Use this for checking quota/limits before processing
+ *
+ * @param supabaseAdmin - Supabase admin client (with service role key)
+ * @param identifier - IP address or user_id
+ * @param endpoint - Endpoint name (e.g., 'analyze-image')
+ * @param limit - Maximum requests allowed
+ * @param windowMinutes - Time window in minutes
+ * @returns Rate limit result with allowed status and metadata
+ */
+export async function checkRateLimitReadonly(
+  supabaseAdmin: any,
+  identifier: string,
+  endpoint: string,
+  limit: number,
+  windowMinutes: number
+): Promise<RateLimitResult> {
+  const { data, error } = await supabaseAdmin.rpc("check_rate_limit_readonly", {
+    p_identifier: identifier,
+    p_endpoint: endpoint,
+    p_limit: limit,
+    p_window_minutes: windowMinutes,
+  });
+
+  if (error) {
+    console.error("Rate limit readonly check error:", error);
+    // On error, allow the request (fail open) but log the error
+    const resetAt = new Date(Date.now() + windowMinutes * 60 * 1000);
+    return {
+      allowed: true,
+      remaining: limit,
+      resetAt,
+      limit,
+    };
+  }
+
+  const result = data?.[0];
+  if (!result) {
+    // If no result, allow the request (fail open)
+    const resetAt = new Date(Date.now() + windowMinutes * 60 * 1000);
+    return {
+      allowed: true,
+      remaining: limit,
+      resetAt,
+      limit,
+    };
+  }
+
+  return {
+    allowed: result.allowed,
+    remaining: result.remaining || 0,
+    resetAt: new Date(result.reset_at),
+    limit,
+  };
+}
+
+/**
+ * Check rate limit for a given identifier and endpoint (INCREMENTS counter)
+ * Use this for tracking usage after successful operations
  *
  * @param supabaseAdmin - Supabase admin client (with service role key)
  * @param identifier - IP address or user_id
@@ -144,7 +202,10 @@ export function createRateLimitErrorResponse(
     JSON.stringify({
       error: "Rate limit exceeded. Please try again later or sign in for higher limits.",
       code: "RATE_LIMIT_EXCEEDED",
+      remaining: result.remaining,
+      limit: result.limit,
       retry_after: Math.max(0, retryAfterSeconds),
+      resets_at: result.resetAt.toISOString(),
     }),
     {
       status: 429,
