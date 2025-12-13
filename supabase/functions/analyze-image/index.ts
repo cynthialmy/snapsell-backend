@@ -394,19 +394,37 @@ async function queryLLM(
         }
     }
 
-    // Convert image to appropriate format
-    const imageBase64 = uint8ArrayToBase64(imageBytes);
-    const imageDataUrl = `data:${mimeType};base64,${imageBase64}`;
+    // Convert image to appropriate format with error handling
+    let imageBase64: string;
+    let imageDataUrl: string;
+    try {
+        console.log(`[queryLLM] Converting image to base64, size: ${imageBytes.length} bytes`);
+        imageBase64 = uint8ArrayToBase64(imageBytes);
+        imageDataUrl = `data:${mimeType};base64,${imageBase64}`;
+        console.log(`[queryLLM] Base64 conversion successful, length: ${imageBase64.length} chars`);
+    } catch (error: any) {
+        console.error(`[queryLLM] Base64 conversion failed:`, error);
+        throw new Error(`Failed to convert image to base64: ${error.message || error}`);
+    }
 
     // Query based on provider
-    if (provider === "openai" || provider === "azure" || provider === "deepseek" || provider === "siliconflow") {
-        return queryOpenAI(client as OpenAI, prompt, imageDataUrl, model!);
-    } else if (provider === "anthropic") {
-        return queryAnthropic(client as Anthropic, prompt, imageBase64, mimeType, model!);
-    } else if (provider === "gemini") {
-        return queryGemini(client as GoogleGenerativeAI, prompt, imageBytes, mimeType, model!);
-    } else {
-        throw new Error(`Unsupported provider: ${provider}`);
+    try {
+        if (provider === "openai" || provider === "azure" || provider === "deepseek" || provider === "siliconflow") {
+            return await queryOpenAI(client as OpenAI, prompt, imageDataUrl, model!);
+        } else if (provider === "anthropic") {
+            return await queryAnthropic(client as Anthropic, prompt, imageBase64, mimeType, model!);
+        } else if (provider === "gemini") {
+            return await queryGemini(client as GoogleGenerativeAI, prompt, imageBytes, mimeType, model!);
+        } else {
+            throw new Error(`Unsupported provider: ${provider}`);
+        }
+    } catch (error: any) {
+        console.error(`[queryLLM] LLM query failed for provider ${provider}:`, {
+            error: error.message || error,
+            errorType: error.constructor?.name,
+            stack: error.stack,
+        });
+        throw error;
     }
 }
 
@@ -767,7 +785,18 @@ serve(async (req) => {
             console.log(`LLM response received in ${elapsedTime}ms, length: ${response?.length || 0}, preview: ${response?.substring(0, 200) || "empty"}`);
         } catch (error: any) {
             const errorMessage = String(error.message || error);
-            console.error(`LLM call failed - provider: ${provider}, error: ${errorMessage}, stack: ${error.stack || "no stack"}`);
+            const errorStack = error.stack || "no stack";
+            const errorName = error.name || error.constructor?.name || "UnknownError";
+
+            console.error(`[Analyze-Image] LLM call failed:`, {
+                provider,
+                model: model || "default",
+                errorMessage,
+                errorName,
+                errorStack: errorStack.substring(0, 500), // Limit stack trace length
+                imageSizeMB: imageSizeMB.toFixed(2),
+                imageSizeBytes: imageBytes.length,
+            });
 
             // Track error
             const errorType =
@@ -1083,10 +1112,20 @@ serve(async (req) => {
             }
         );
     } catch (error: any) {
-        console.error("Unexpected error:", error);
+        const errorMessage = error?.message || String(error || "Unknown error");
+        const errorStack = error?.stack || "no stack";
+        const errorName = error?.name || error?.constructor?.name || "UnknownError";
+
+        console.error("[Analyze-Image] Unexpected top-level error:", {
+            errorMessage,
+            errorName,
+            errorStack: errorStack.substring(0, 1000), // Limit stack trace
+            errorType: typeof error,
+            errorKeys: error ? Object.keys(error) : [],
+        });
 
         // Try to get rate limit headers even on error
-        let rateLimitHeaders: Record<string, string> = {};
+        let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
         try {
             const supabaseUrl = Deno.env.get("SUPABASE_URL");
             const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -1119,10 +1158,15 @@ serve(async (req) => {
             }
         } catch (e) {
             // Ignore rate limit errors in error handler
+            console.error("[Analyze-Image] Error getting rate limit headers in error handler:", e);
         }
 
         return new Response(
-            JSON.stringify({ detail: `Internal server error: ${error.message}` }),
+            JSON.stringify({
+                detail: `Internal server error: ${errorMessage}`,
+                code: "INTERNAL_SERVER_ERROR",
+                error_name: errorName,
+            }),
             {
                 status: 500,
                 headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
