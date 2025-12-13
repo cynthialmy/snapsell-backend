@@ -101,20 +101,25 @@ const POSTHOG_HOST = Deno.env.get("POSTHOG_HOST");
  * Uses chunked approach to handle large images safely
  */
 function uint8ArrayToBase64(bytes: Uint8Array): string {
-    // Use chunked approach to avoid stack overflow for large arrays
-    // Process in smaller chunks to safely use apply() without exceeding call stack
-    // Conservative chunk size to ensure apply() doesn't exceed stack limits
-    const chunkSize = 16384; // 16KB chunks - safe for apply() on all platforms
-    const chunks: string[] = [];
+    try {
+        // Use chunked approach to avoid stack overflow for large arrays
+        // Process in smaller chunks to safely use apply() without exceeding call stack
+        // Conservative chunk size to ensure apply() doesn't exceed stack limits
+        const chunkSize = 16384; // 16KB chunks - safe for apply() on all platforms
+        const chunks: string[] = [];
 
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-        const chunk = bytes.slice(i, i + chunkSize);
-        // Convert chunk to array first, then use apply (safer than spread operator)
-        const chunkArray = Array.from(chunk);
-        chunks.push(String.fromCharCode.apply(null, chunkArray));
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            const chunk = bytes.slice(i, i + chunkSize);
+            // Convert chunk to array first, then use apply (safer than spread operator)
+            const chunkArray = Array.from(chunk);
+            chunks.push(String.fromCharCode.apply(null, chunkArray));
+        }
+
+        return btoa(chunks.join(''));
+    } catch (error: any) {
+        console.error(`Base64 conversion failed - size: ${bytes.length} bytes, error: ${error.message}`);
+        throw new Error(`Failed to convert image to base64: ${error.message}`);
     }
-
-    return btoa(chunks.join(''));
 }
 
 function buildPromptTemplate(currency?: string): string {
@@ -639,20 +644,99 @@ serve(async (req) => {
         }
 
         // Convert image to bytes
-        const imageBytes = new Uint8Array(await imageFile.arrayBuffer());
-        const mimeType = imageFile.type || "image/jpeg";
+        let imageBytes: Uint8Array;
+        let mimeType: string;
+        try {
+            imageBytes = new Uint8Array(await imageFile.arrayBuffer());
+            mimeType = imageFile.type || "image/jpeg";
+        } catch (error: any) {
+            console.error(`Failed to read image file: ${error.message}`);
+            await trackEvent("api_analyze_error", { provider, error_type: "image_read_failed" }, distinctId);
+
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
+            return new Response(
+                JSON.stringify({
+                    detail: `Failed to read image file: ${error.message}`,
+                    code: "IMAGE_READ_ERROR"
+                }),
+                {
+                    status: 400,
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
+                }
+            );
+        }
+
+        const imageSizeMB = imageBytes.length / (1024 * 1024);
+        console.log(`Image processing - size: ${imageSizeMB.toFixed(2)}MB, type: ${mimeType}, provider: ${provider}`);
+
+        // Validate image size (max 10MB to prevent memory issues)
+        const MAX_IMAGE_SIZE_MB = 10;
+        if (imageSizeMB > MAX_IMAGE_SIZE_MB) {
+            await trackEvent("api_analyze_error", { provider, error_type: "image_too_large", size_mb: imageSizeMB }, distinctId);
+
+            let rateLimitHeaders: Record<string, string> = {};
+            if (supabaseUrl && supabaseServiceRoleKey) {
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const hourlyLimit = userId ? 50 : 10;
+                const hourlyResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image",
+                    hourlyLimit,
+                    60
+                );
+                rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+            }
+
+            return new Response(
+                JSON.stringify({
+                    detail: `Image is too large (${imageSizeMB.toFixed(2)}MB). Maximum size is ${MAX_IMAGE_SIZE_MB}MB. Please compress or resize your image.`,
+                    code: "IMAGE_TOO_LARGE"
+                }),
+                {
+                    status: 400,
+                    headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
+                }
+            );
+        }
 
         // Build prompt
         const prompt = buildPromptTemplate(currency);
 
-        // Call LLM
+        // Call LLM with timeout (60 seconds)
         let response: string;
         try {
-            console.log(`Calling LLM with provider: ${provider}, model: ${model || "default"}`);
-            response = await queryLLM(provider, prompt, imageBytes, mimeType, model);
-            console.log(`LLM response received, length: ${response?.length || 0}, preview: ${response?.substring(0, 200) || "empty"}`);
+            console.log(`Calling LLM with provider: ${provider}, model: ${model || "default"}, image size: ${imageSizeMB.toFixed(2)}MB`);
+            const startTime = Date.now();
+
+            // Add timeout wrapper for LLM calls
+            const LLM_TIMEOUT_MS = 60000; // 60 seconds
+            const llmPromise = queryLLM(provider, prompt, imageBytes, mimeType, model);
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error(`LLM request timed out after ${LLM_TIMEOUT_MS}ms`)), LLM_TIMEOUT_MS);
+            });
+
+            response = await Promise.race([llmPromise, timeoutPromise]);
+            const elapsedTime = Date.now() - startTime;
+            console.log(`LLM response received in ${elapsedTime}ms, length: ${response?.length || 0}, preview: ${response?.substring(0, 200) || "empty"}`);
         } catch (error: any) {
             const errorMessage = String(error.message || error);
+            console.error(`LLM call failed - provider: ${provider}, error: ${errorMessage}, stack: ${error.stack || "no stack"}`);
 
             // Track error
             const errorType =
@@ -666,20 +750,33 @@ serve(async (req) => {
 
             await trackEvent("api_analyze_error", { provider, error_type: errorType }, distinctId);
 
-            // Return user-friendly error
+            // Return user-friendly error with more context
             let detail: string;
-            if (
+            let errorCode = "LLM_ERROR";
+
+            if (errorMessage.toLowerCase().includes("timeout")) {
+                detail = `The image analysis request timed out. The image may be too large or the service is temporarily unavailable. Please try again with a smaller image.`;
+                errorCode = "LLM_TIMEOUT";
+            } else if (
                 errorMessage.toLowerCase().includes("quota") ||
                 errorMessage.toLowerCase().includes("insufficient_quota")
             ) {
                 detail = `API quota exceeded. Please check your ${provider} account billing and usage limits. Error: ${errorMessage}`;
+                errorCode = "LLM_QUOTA_EXCEEDED";
             } else if (
                 errorMessage.toLowerCase().includes("api_key") ||
                 errorMessage.toLowerCase().includes("authentication")
             ) {
                 detail = `API authentication failed. Please check your ${provider} API key in environment variables. Error: ${errorMessage}`;
+                errorCode = "LLM_AUTH_ERROR";
+            } else if (
+                errorMessage.toLowerCase().includes("rate limit") ||
+                errorMessage.toLowerCase().includes("rate_limit")
+            ) {
+                detail = `Rate limit exceeded for ${provider} API. Please try again later.`;
+                errorCode = "LLM_RATE_LIMIT";
             } else {
-                detail = `Vision model error: ${errorMessage}`;
+                detail = `Vision model error: ${errorMessage}. Please try again with a different image or provider.`;
             }
 
             // Get rate limit headers for error response
@@ -699,7 +796,12 @@ serve(async (req) => {
             }
 
             return new Response(
-                JSON.stringify({ detail }),
+                JSON.stringify({
+                    detail,
+                    code: errorCode,
+                    provider,
+                    image_size_mb: imageSizeMB.toFixed(2)
+                }),
                 {
                     status: 502,
                     headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
