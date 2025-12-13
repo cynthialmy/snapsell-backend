@@ -194,15 +194,15 @@ function extractJsonFromResponse(response: string): string {
     return jsonText.trim();
 }
 
-async function trackEvent(
+function trackEvent(
     event: string,
     properties: Record<string, any>,
     distinctId: string = "anonymous"
-) {
+): void {
     if (!POSTHOG_API_KEY || !POSTHOG_HOST) return;
 
+    // Non-blocking - fire and forget, don't return a promise
     try {
-        // Non-blocking - don't await, fire and forget
         fetch(`${POSTHOG_HOST}/capture/`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -514,7 +514,9 @@ serve(async (req) => {
             });
 
             if (!hourlyResult.allowed) {
-                await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                console.log(`[Analyze-Image] Rate limit exceeded, returning 429 response`);
+                // Track event non-blocking
+                trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
                 return createRateLimitErrorResponse(hourlyResult, corsHeaders);
             }
 
@@ -534,7 +536,11 @@ serve(async (req) => {
                 });
 
                 if (!shortWindowResult.allowed) {
-                    await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
+                    console.log(`[Analyze-Image] 15-minute rate limit exceeded, returning 429 response`);
+                    // Track event non-blocking (don't await)
+                    trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId).catch(err => {
+                        console.error("[Analyze-Image] Failed to track rate limit event:", err);
+                    });
                     return createRateLimitErrorResponse(shortWindowResult, corsHeaders);
                 }
 
@@ -554,7 +560,9 @@ serve(async (req) => {
                 });
 
                 if (!dailyQuotaResult.allowed) {
-                    await trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
+                    console.log(`[Analyze-Image] Daily quota exceeded, returning 402 response`);
+                    // Track event non-blocking
+                    trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
                     return new Response(
                         JSON.stringify({
                             error: "Daily creation limit exceeded",
@@ -659,8 +667,8 @@ serve(async (req) => {
             );
         }
 
-        // Track request (after rate limit check passes)
-        await trackEvent("api_analyze_requested", { provider }, distinctId);
+        // Track request (after rate limit check passes) - non-blocking
+        trackEvent("api_analyze_requested", { provider }, distinctId);
 
         // Get rate limit headers for response (re-check to get current state)
         let rateLimitHeaders: Record<string, string> = {};
@@ -713,7 +721,7 @@ serve(async (req) => {
                     if (error) console.error("Analytics error:", error);
                 });
 
-                await trackEvent("api_analyze_error", { provider, error_type: "quota_exceeded" }, distinctId);
+                trackEvent("api_analyze_error", { provider, error_type: "quota_exceeded" }, distinctId);
 
                 return new Response(
                     JSON.stringify({
@@ -740,7 +748,7 @@ serve(async (req) => {
             mimeType = imageFile.type || "image/jpeg";
         } catch (error: any) {
             console.error(`Failed to read image file: ${error.message}`);
-            await trackEvent("api_analyze_error", { provider, error_type: "image_read_failed" }, distinctId);
+            trackEvent("api_analyze_error", { provider, error_type: "image_read_failed" }, distinctId);
 
             let rateLimitHeaders: Record<string, string> = {};
             if (supabaseUrl && supabaseServiceRoleKey) {
@@ -775,7 +783,7 @@ serve(async (req) => {
         // Validate image size (max 10MB to prevent memory issues)
         const MAX_IMAGE_SIZE_MB = 10;
         if (imageSizeMB > MAX_IMAGE_SIZE_MB) {
-            await trackEvent("api_analyze_error", { provider, error_type: "image_too_large", size_mb: imageSizeMB }, distinctId);
+            trackEvent("api_analyze_error", { provider, error_type: "image_too_large", size_mb: imageSizeMB }, distinctId);
 
             let rateLimitHeaders: Record<string, string> = {};
             if (supabaseUrl && supabaseServiceRoleKey) {
@@ -848,7 +856,7 @@ serve(async (req) => {
                         ? "authentication"
                         : "other";
 
-            await trackEvent("api_analyze_error", { provider, error_type: errorType }, distinctId);
+            trackEvent("api_analyze_error", { provider, error_type: errorType }, distinctId);
 
             // Return user-friendly error with more context
             let detail: string;
@@ -919,7 +927,7 @@ serve(async (req) => {
                 responseIsUndefined: response === undefined,
             });
 
-            await trackEvent("api_analyze_error", { provider, error_type: "empty_response", model: model || "default" }, distinctId);
+            trackEvent("api_analyze_error", { provider, error_type: "empty_response", model: model || "default" }, distinctId);
 
             // Get rate limit headers
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
@@ -1009,7 +1017,7 @@ serve(async (req) => {
                 titleLength: listing.title?.length || 0,
             });
 
-            await trackEvent("api_analyze_error", { provider, error_type: "invalid_data", model: model || "default" }, distinctId);
+            trackEvent("api_analyze_error", { provider, error_type: "invalid_data", model: model || "default" }, distinctId);
 
             // Get rate limit headers for error response
             let rateLimitHeaders: Record<string, string> = {};
@@ -1106,8 +1114,8 @@ serve(async (req) => {
             }
         }
 
-        // Track success
-        await trackEvent(
+        // Track success - non-blocking
+        trackEvent(
             "api_analyze_success",
             { provider, has_title: Boolean(listing.title) },
             distinctId
