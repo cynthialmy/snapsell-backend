@@ -486,9 +486,11 @@ serve(async (req) => {
         }
 
         // Check rate limits
+        console.log(`[Analyze-Image] Starting rate limit checks, userId: ${userId || "none"}`);
         if (supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
             const identifier = getRateLimitIdentifier(req, userId);
+            console.log(`[Analyze-Image] Rate limit identifier: ${identifier}`);
 
             // Rate limits:
             // - Unauthenticated: 10 per hour (60 minutes), 5 per 15 minutes
@@ -497,6 +499,7 @@ serve(async (req) => {
             const hourlyWindow = 60;
 
             // Check hourly limit first
+            console.log(`[Analyze-Image] Checking hourly rate limit (limit: ${hourlyLimit}, window: ${hourlyWindow}min)`);
             const hourlyResult = await checkRateLimit(
                 supabaseAdmin,
                 identifier,
@@ -504,6 +507,11 @@ serve(async (req) => {
                 hourlyLimit,
                 hourlyWindow
             );
+            console.log(`[Analyze-Image] Hourly rate limit result:`, {
+                allowed: hourlyResult.allowed,
+                remaining: hourlyResult.remaining,
+                resetAt: hourlyResult.resetAt.toISOString(),
+            });
 
             if (!hourlyResult.allowed) {
                 await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
@@ -512,6 +520,7 @@ serve(async (req) => {
 
             // For unauthenticated users, also check 15-minute window (5 requests)
             if (!userId) {
+                console.log(`[Analyze-Image] Checking 15-minute rate limit for unauthenticated user`);
                 const shortWindowResult = await checkRateLimit(
                     supabaseAdmin,
                     identifier,
@@ -519,6 +528,10 @@ serve(async (req) => {
                     5,
                     15
                 );
+                console.log(`[Analyze-Image] 15-minute rate limit result:`, {
+                    allowed: shortWindowResult.allowed,
+                    remaining: shortWindowResult.remaining,
+                });
 
                 if (!shortWindowResult.allowed) {
                     await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
@@ -526,6 +539,7 @@ serve(async (req) => {
                 }
 
                 // Check daily quota for unauthenticated users (10 per day)
+                console.log(`[Analyze-Image] Checking daily quota for unauthenticated user (10 per day)`);
                 const dailyQuotaResult = await checkRateLimit(
                     supabaseAdmin,
                     identifier,
@@ -533,6 +547,11 @@ serve(async (req) => {
                     10,
                     1440 // 24 hours in minutes
                 );
+                console.log(`[Analyze-Image] Daily quota result:`, {
+                    allowed: dailyQuotaResult.allowed,
+                    remaining: dailyQuotaResult.remaining,
+                    resetAt: dailyQuotaResult.resetAt.toISOString(),
+                });
 
                 if (!dailyQuotaResult.allowed) {
                     await trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
@@ -559,11 +578,32 @@ serve(async (req) => {
         }
 
         // Parse form data
-        const formData = await req.formData();
+        console.log(`[Analyze-Image] Starting form data parsing`);
+        let formData: FormData;
+        try {
+            formData = await req.formData();
+            console.log(`[Analyze-Image] Form data parsed successfully`);
+        } catch (error: any) {
+            console.error(`[Analyze-Image] Form data parsing failed:`, {
+                error: error.message || error,
+                errorType: error.constructor?.name,
+            });
+            throw new Error(`Failed to parse form data: ${error.message || error}`);
+        }
+
         const imageFile = formData.get("image") as File | null;
         const provider = (formData.get("provider")?.toString() || "azure") as LLMProvider;
         const model = formData.get("model")?.toString();
         const currency = formData.get("currency")?.toString();
+        console.log(`[Analyze-Image] Form data extracted:`, {
+            hasImage: !!imageFile,
+            imageFileName: imageFile?.name,
+            imageFileSize: imageFile?.size,
+            imageFileType: imageFile?.type,
+            provider,
+            model: model || "default",
+            currency: currency || "none",
+        });
 
         // Validate image
         if (!imageFile) {
