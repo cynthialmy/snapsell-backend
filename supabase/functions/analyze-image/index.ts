@@ -285,39 +285,51 @@ function createLLMClient(provider: LLMProvider, model?: string) {
             if (!AZURE_OPENAI_API_KEY || !AZURE_OPENAI_ENDPOINT) {
                 throw new Error("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT required");
             }
-            // For Azure OpenAI, the endpoint can be:
-            // 1. Full endpoint with /openai/v1/ (e.g., https://resource.openai.azure.com/openai/v1/)
-            // 2. Base resource URL (e.g., https://resource.openai.azure.com)
-            // We need to extract the base resource URL and construct: /openai/deployments/{deployment}
+            // For Azure OpenAI, the TypeScript SDK works the same as Python SDK:
+            // - Use baseURL with /openai/v1/ (e.g., https://resource.openai.azure.com/openai/v1/)
+            // - Pass deployment name as the model parameter in API calls
+            //
+            // Accept endpoints in formats:
+            // 1. https://resource.openai.azure.com/openai/v1/ (preferred)
+            // 2. https://resource.openai.azure.com (will normalize to add /openai/v1)
+            // 3. https://resource.openai.azure.com/openai/deployments/{deployment} (will normalize)
             let azureEndpoint = AZURE_OPENAI_ENDPOINT.replace(/\/$/, "");
 
-            // Remove /openai/v1 or /openai/v1/ from the end if present
-            azureEndpoint = azureEndpoint.replace(/\/openai\/v1\/?$/, "");
-
-            // Remove /openai/deployments/... if already present
+            // Remove /openai/deployments/... if already present (wrong format)
             if (azureEndpoint.includes("/openai/deployments/")) {
                 azureEndpoint = azureEndpoint.split("/openai/deployments/")[0];
             }
 
-            // Now we have the base resource URL (e.g., https://resource.openai.azure.com)
-            const baseResourceURL = azureEndpoint;
-            const deploymentName = model || AZURE_OPENAI_MODEL;
+            // Ensure endpoint ends with /openai/v1 (add if missing)
+            if (!azureEndpoint.includes("/openai/v1")) {
+                // If it's just the base resource URL, add /openai/v1
+                azureEndpoint = `${azureEndpoint}/openai/v1`;
+            } else if (azureEndpoint.endsWith("/openai/v1")) {
+                // Already correct, no trailing slash needed
+            } else {
+                // Has /openai/v1 but might have extra path, normalize
+                const v1Index = azureEndpoint.indexOf("/openai/v1");
+                azureEndpoint = azureEndpoint.substring(0, v1Index + "/openai/v1".length);
+            }
 
-            // Construct the full base URL: https://resource.openai.azure.com/openai/deployments/{deployment}
-            // The SDK will append /chat/completions automatically
-            const fullBaseURL = `${baseResourceURL}/openai/deployments/${deploymentName}`;
+            // Get deployment name - use provided model or fall back to environment variable
+            // Read environment variable at runtime to ensure we get the latest value
+            const envDeploymentName = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || AZURE_OPENAI_MODEL;
+            const deploymentName = model || envDeploymentName;
 
             console.log(`[createLLMClient] Azure OpenAI configuration:`, {
                 originalEndpoint: AZURE_OPENAI_ENDPOINT,
-                baseResourceURL,
-                deploymentName,
-                fullBaseURL,
+                normalizedBaseURL: azureEndpoint,
+                providedModel: model || "(none)",
+                envDeploymentName,
+                finalDeploymentName: deploymentName,
                 apiVersion: AZURE_OPENAI_API_VERSION,
+                note: "Deployment name will be passed as 'model' parameter in API calls",
             });
 
             return new OpenAI({
                 apiKey: AZURE_OPENAI_API_KEY,
-                baseURL: fullBaseURL,
+                baseURL: azureEndpoint,
                 defaultQuery: { "api-version": AZURE_OPENAI_API_VERSION },
             });
 
@@ -366,26 +378,29 @@ async function queryOpenAI(
     imageDataUrl: string,
     model: string
 ): Promise<string> {
-    // For Azure OpenAI, if the baseURL already includes the deployment path,
-    // we need to extract the deployment name from the baseURL and use it as the model
-    // This ensures the model parameter matches what's in the baseURL
-    let modelToUse = model;
-
-    // Check if this is an Azure OpenAI client (baseURL contains /openai/deployments/)
+    // For Azure OpenAI with /openai/v1/ baseURL format:
+    // - The deployment name is passed directly as the model parameter
+    // - No need to extract from baseURL (that was for the old /openai/deployments/{deployment} format)
     const clientBaseURL = (client as any).baseURL || "";
-    if (clientBaseURL.includes("/openai/deployments/")) {
-        // Extract deployment name from baseURL
+    const isAzureV1Format = clientBaseURL.includes("/openai/v1");
+
+    if (isAzureV1Format) {
+        console.log(`[queryOpenAI] Azure OpenAI detected (v1 format), using deployment name as model: ${model}, baseURL: ${clientBaseURL}`);
+    } else if (clientBaseURL.includes("/openai/deployments/")) {
+        // Legacy format - extract deployment from baseURL for backward compatibility
         const deploymentMatch = clientBaseURL.match(/\/openai\/deployments\/([^\/]+)/);
         if (deploymentMatch && deploymentMatch[1]) {
-            modelToUse = deploymentMatch[1];
-            console.log(`[queryOpenAI] Azure OpenAI detected, using deployment from baseURL: ${modelToUse} (original model param: ${model})`);
-        } else {
-            console.log(`[queryOpenAI] Azure OpenAI detected but could not extract deployment name from baseURL: ${clientBaseURL}`);
+            const extractedDeployment = deploymentMatch[1];
+            console.log(`[queryOpenAI] Azure OpenAI detected (legacy deployments format), extracted deployment: ${extractedDeployment}, using model param: ${model}`);
+            // Use the extracted deployment to ensure consistency
+            model = extractedDeployment;
         }
     }
 
+    console.log(`[queryOpenAI] Making request with model: ${model}, baseURL: ${clientBaseURL}`);
+
     const completion = await client.chat.completions.create({
-        model: modelToUse,
+        model: model,
         messages: [
             {
                 role: "user",
@@ -465,13 +480,15 @@ async function queryLLM(
     const client = createLLMClient(provider, model);
 
     // Get default model if not provided
+    // Read environment variables at runtime to ensure we get the latest values
     if (!model) {
         switch (provider) {
             case "openai":
-                model = OPENAI_MODEL;
+                model = Deno.env.get("OPENAI_MODEL_DEPLOYMENT") || OPENAI_MODEL;
                 break;
             case "azure":
-                model = AZURE_OPENAI_MODEL;
+                model = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || AZURE_OPENAI_MODEL;
+                console.log(`[queryLLM] Azure model selection - env var: ${Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "(not set)"}, fallback: ${AZURE_OPENAI_MODEL}, final: ${model}`);
                 break;
             case "anthropic":
                 model = ANTHROPIC_MODEL;
@@ -486,6 +503,8 @@ async function queryLLM(
                 model = SILICONFLOW_MODEL;
                 break;
         }
+    } else {
+        console.log(`[queryLLM] Using provided model: ${model}`);
     }
 
     // Convert image to appropriate format with error handling
