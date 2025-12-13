@@ -510,7 +510,10 @@ async function queryLLM(
     mimeType: string,
     model?: string
 ): Promise<string> {
+    console.log(`[queryLLM] ===== ENTERING queryLLM =====`);
+    console.log(`[queryLLM] Provider: ${provider}, model: ${model || "(not provided)"}, imageBytes: ${imageBytes.length} bytes, mimeType: ${mimeType}`);
     const client = createLLMClient(provider, model);
+    console.log(`[queryLLM] Client created successfully`);
 
     // Get default model if not provided
     // Read environment variables at runtime to ensure we get the latest values
@@ -1013,22 +1016,29 @@ serve(async (req) => {
 
         // Build prompt
         const prompt = buildPromptTemplate(currency);
+        console.log(`[Analyze-Image] Prompt built, length: ${prompt.length} chars`);
 
         // Call LLM with timeout (60 seconds)
         let response: string;
         try {
+            console.log(`[Analyze-Image] ===== STARTING LLM CALL =====`);
+            console.log(`[Analyze-Image] About to call LLM - provider: ${provider}, model: ${model || "default"}, image size: ${imageSizeMB.toFixed(2)}MB`);
             console.log(`Calling LLM with provider: ${provider}, model: ${model || "default"}, image size: ${imageSizeMB.toFixed(2)}MB`);
             const startTime = Date.now();
 
             // Add timeout wrapper for LLM calls
             const LLM_TIMEOUT_MS = 60000; // 60 seconds
+            console.log(`[Analyze-Image] Creating LLM promise with timeout: ${LLM_TIMEOUT_MS}ms`);
             const llmPromise = queryLLM(provider, prompt, imageBytes, mimeType, model);
+            console.log(`[Analyze-Image] LLM promise created, waiting for response...`);
             const timeoutPromise = new Promise<never>((_, reject) => {
                 setTimeout(() => reject(new Error(`LLM request timed out after ${LLM_TIMEOUT_MS}ms`)), LLM_TIMEOUT_MS);
             });
 
+            console.log(`[Analyze-Image] Racing LLM promise against timeout...`);
             response = await Promise.race([llmPromise, timeoutPromise]);
             const elapsedTime = Date.now() - startTime;
+            console.log(`[Analyze-Image] ===== LLM CALL COMPLETED =====`);
             console.log(`LLM response received in ${elapsedTime}ms, length: ${response?.length || 0}, preview: ${response?.substring(0, 200) || "empty"}`);
         } catch (error: any) {
             const errorMessage = String(error.message || error);
