@@ -319,21 +319,34 @@ function createLLMClient(provider: LLMProvider, model?: string) {
             const envDeploymentName = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || AZURE_OPENAI_MODEL;
             const deploymentName = model || envDeploymentName;
 
+            // When using /openai/v1/ endpoint, api-version query parameter is NOT required
+            // The unified v1 endpoint handles versioning automatically
+            const isV1Endpoint = azureEndpoint.includes("/openai/v1");
+
             console.log(`[createLLMClient] Azure OpenAI configuration:`, {
                 originalEndpoint: AZURE_OPENAI_ENDPOINT,
                 normalizedBaseURL: azureEndpoint,
                 providedModel: model || "(none)",
                 envDeploymentName,
                 finalDeploymentName: deploymentName,
-                apiVersion: AZURE_OPENAI_API_VERSION,
+                isV1Endpoint,
+                apiVersion: isV1Endpoint ? "not required (v1 endpoint)" : AZURE_OPENAI_API_VERSION,
                 note: "Deployment name will be passed as 'model' parameter in API calls",
             });
 
-            return new OpenAI({
+            // For v1 endpoint, don't include api-version query parameter
+            // For legacy endpoints, include api-version
+            const clientConfig: any = {
                 apiKey: AZURE_OPENAI_API_KEY,
                 baseURL: azureEndpoint,
-                defaultQuery: { "api-version": AZURE_OPENAI_API_VERSION },
-            });
+            };
+
+            if (!isV1Endpoint) {
+                // Only add api-version for legacy endpoints
+                clientConfig.defaultQuery = { "api-version": AZURE_OPENAI_API_VERSION };
+            }
+
+            return new OpenAI(clientConfig);
 
         case "deepseek":
             if (!DEEPSEEK_API_KEY) {
@@ -401,7 +414,15 @@ async function queryOpenAI(
 
     console.log(`[queryOpenAI] Making request with model: ${model}, baseURL: ${clientBaseURL}`);
 
-    const completion = await client.chat.completions.create({
+    // GPT-5 models (reasoning models) don't support temperature parameter
+    // They only support the default value of 1
+    // Check if this is a GPT-5 model by checking the model name
+    const isGPT5Model = model.toLowerCase().includes("gpt-5") ||
+        model.toLowerCase().includes("o1") ||
+        model.toLowerCase().includes("o3") ||
+        model.toLowerCase().includes("o4");
+
+    const requestOptions: any = {
         model: model,
         messages: [
             {
@@ -415,8 +436,17 @@ async function queryOpenAI(
                 ],
             },
         ],
-        temperature: 0.7,
-    });
+    };
+
+    // Only add temperature for non-GPT-5 models
+    if (!isGPT5Model) {
+        requestOptions.temperature = 0.7;
+        console.log(`[queryOpenAI] Using temperature=0.7 for model: ${model}`);
+    } else {
+        console.log(`[queryOpenAI] Skipping temperature parameter for GPT-5/reasoning model: ${model}`);
+    }
+
+    const completion = await client.chat.completions.create(requestOptions);
 
     return completion.choices[0].message.content || "";
 }
