@@ -70,9 +70,18 @@ export async function checkRateLimitReadonly(
     };
   }
 
+  // Handle null/undefined values - default to allowing if unclear
+  // For a new IP, allowed should be true and remaining should be limit
+  const allowed = result.allowed !== null && result.allowed !== undefined
+    ? Boolean(result.allowed)
+    : true;
+  const remaining = result.remaining !== null && result.remaining !== undefined
+    ? Number(result.remaining)
+    : limit;
+
   return {
-    allowed: result.allowed,
-    remaining: result.remaining || 0,
+    allowed,
+    remaining,
     resetAt: new Date(result.reset_at),
     limit,
   };

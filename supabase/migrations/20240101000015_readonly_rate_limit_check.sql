@@ -29,17 +29,19 @@ BEGIN
   v_reset_at := v_window_start + (p_window_minutes || ' minutes')::interval;
 
   -- Get current count WITHOUT incrementing
-  SELECT COALESCE(request_count, 0) INTO v_current_count
+  -- If no record exists, v_current_count stays 0 (default value)
+  SELECT COALESCE(SUM(request_count), 0) INTO v_current_count
   FROM public.rate_limits
   WHERE identifier = p_identifier
     AND endpoint = p_endpoint
     AND window_start = v_window_start;
 
   -- Check if limit is exceeded
+  -- For a new IP with no records, v_current_count = 0, so allowed = true, remaining = limit
   RETURN QUERY SELECT
-    (v_current_count < p_limit) as allowed,
+    (v_current_count < p_limit)::boolean as allowed,
     GREATEST(0, p_limit - v_current_count)::integer as remaining,
     v_reset_at as reset_at,
-    v_current_count as current_count;
+    v_current_count::integer as current_count;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
