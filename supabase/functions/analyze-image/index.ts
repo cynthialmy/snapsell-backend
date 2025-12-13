@@ -506,6 +506,37 @@ serve(async (req) => {
                     await trackEvent("api_analyze_rate_limited", { provider: "unknown" }, distinctId);
                     return createRateLimitErrorResponse(shortWindowResult, corsHeaders);
                 }
+
+                // Check daily quota for unauthenticated users (10 per day)
+                const dailyQuotaResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-daily",
+                    10,
+                    1440 // 24 hours in minutes
+                );
+
+                if (!dailyQuotaResult.allowed) {
+                    await trackEvent("api_analyze_quota_exceeded", { provider: "unknown", quota_type: "daily" }, distinctId);
+                    return new Response(
+                        JSON.stringify({
+                            error: "Daily creation limit exceeded",
+                            code: "ANONYMOUS_DAILY_LIMIT_EXCEEDED",
+                            message: "You've reached your daily creation limit (10 per day). Sign in for higher limits or try again tomorrow.",
+                            creations_remaining_today: dailyQuotaResult.remaining,
+                            creations_daily_limit: 10,
+                            resets_at: dailyQuotaResult.resetAt.toISOString(),
+                        }),
+                        {
+                            status: 402,
+                            headers: {
+                                ...corsHeaders,
+                                ...getRateLimitHeaders(dailyQuotaResult),
+                                "Content-Type": "application/json",
+                            },
+                        }
+                    );
+                }
             }
         }
 
@@ -519,7 +550,7 @@ serve(async (req) => {
         // Validate image
         if (!imageFile) {
             // Get rate limit headers
-            let rateLimitHeaders: Record<string, string> = {};
+            let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
@@ -546,7 +577,7 @@ serve(async (req) => {
         // Validate content type
         if (!imageFile.type || !imageFile.type.startsWith("image/")) {
             // Get rate limit headers
-            let rateLimitHeaders: Record<string, string> = {};
+            let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
@@ -809,9 +840,20 @@ serve(async (req) => {
             );
         }
 
-        if (!response) {
+        if (!response || response.trim().length === 0) {
+            console.error(`[Analyze-Image] LLM returned empty response:`, {
+                provider,
+                model: model || "default",
+                responseLength: response?.length || 0,
+                responseType: typeof response,
+                responseIsNull: response === null,
+                responseIsUndefined: response === undefined,
+            });
+
+            await trackEvent("api_analyze_error", { provider, error_type: "empty_response", model: model || "default" }, distinctId);
+
             // Get rate limit headers
-            let rateLimitHeaders: Record<string, string> = {};
+            let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
@@ -827,7 +869,11 @@ serve(async (req) => {
             }
 
             return new Response(
-                JSON.stringify({ detail: "Vision model failed to return a response." }),
+                JSON.stringify({
+                    detail: "Vision model failed to return a response. Please try again with a different image or provider.",
+                    code: "LLM_EMPTY_RESPONSE",
+                    provider,
+                }),
                 {
                     status: 502,
                     headers: { ...corsHeaders, ...rateLimitHeaders, "Content-Type": "application/json" },
@@ -850,7 +896,7 @@ serve(async (req) => {
         } catch (e) {
             console.error(`JSON parse error:`, e, `Raw JSON text:`, jsonText.substring(0, 500));
             // Get rate limit headers
-            let rateLimitHeaders: Record<string, string> = {};
+            let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
@@ -882,14 +928,19 @@ serve(async (req) => {
         // Validate that we got meaningful data from the LLM
         const hasMeaningfulData = listing.title && listing.title.trim().length > 0;
         if (!hasMeaningfulData) {
-            console.error("LLM returned empty or invalid data:", {
+            console.error("[Analyze-Image] LLM returned empty or invalid data:", {
                 provider,
-                rawResponse: response ? response.substring(0, 200) : "response is undefined",
+                model: model || "default",
+                rawResponse: response ? response.substring(0, 500) : "response is undefined",
+                rawResponseLength: response?.length || 0,
+                extractedJson: jsonText ? jsonText.substring(0, 500) : "jsonText is undefined",
                 parsed,
-                listing
+                listing,
+                hasTitle: !!listing.title,
+                titleLength: listing.title?.length || 0,
             });
 
-            await trackEvent("api_analyze_error", { provider, error_type: "empty_response" }, distinctId);
+            await trackEvent("api_analyze_error", { provider, error_type: "invalid_data", model: model || "default" }, distinctId);
 
             // Get rate limit headers for error response
             let rateLimitHeaders: Record<string, string> = {};
@@ -920,47 +971,69 @@ serve(async (req) => {
             );
         }
 
-        // If authenticated, decrement quota AFTER successful analysis
-        // Each generation/analysis consumes creation quota
-        if (userId && supabaseUrl && supabaseServiceRoleKey) {
-            console.log(`[Analyze-Image] Decrementing creation quota for user ${userId} after successful analysis`);
+        // Track quota usage AFTER successful analysis
+        // For authenticated users: decrement creation quota
+        // For unauthenticated users: track daily quota usage
+        if (supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+            const identifier = getRateLimitIdentifier(req, userId);
 
-            // Get quota before decrement for logging
-            const { data: quotaBeforeData } = await supabaseAdmin.rpc("get_user_quota", {
-                p_user_id: userId,
-            });
-            const quotaBefore = quotaBeforeData?.[0];
-            console.log(`[Analyze-Image] Quota before decrement:`, {
-                creations_remaining_today: quotaBefore?.creations_remaining_today,
-                bonus_creations_remaining: quotaBefore?.bonus_creations_remaining,
-            });
+            if (userId) {
+                // Authenticated users: decrement creation quota
+                console.log(`[Analyze-Image] Decrementing creation quota for user ${userId} after successful analysis`);
 
-            const { data: quotaDecremented, error: quotaDecrementError } = await supabaseAdmin.rpc(
-                "decrement_creation_quota",
-                {
+                // Get quota before decrement for logging
+                const { data: quotaBeforeData } = await supabaseAdmin.rpc("get_user_quota", {
                     p_user_id: userId,
-                    p_amount: 1,
+                });
+                const quotaBefore = quotaBeforeData?.[0];
+                console.log(`[Analyze-Image] Quota before decrement:`, {
+                    creations_remaining_today: quotaBefore?.creations_remaining_today,
+                    bonus_creations_remaining: quotaBefore?.bonus_creations_remaining,
+                });
+
+                const { data: quotaDecremented, error: quotaDecrementError } = await supabaseAdmin.rpc(
+                    "decrement_creation_quota",
+                    {
+                        p_user_id: userId,
+                        p_amount: 1,
+                    }
+                );
+
+                console.log(`[Analyze-Image] Decrement result:`, {
+                    userId,
+                    quotaDecremented,
+                    error: quotaDecrementError,
+                    errorMessage: quotaDecrementError?.message,
+                    errorCode: quotaDecrementError?.code,
+                });
+
+                if (quotaDecrementError) {
+                    console.error("[Analyze-Image] Decrement error after successful analysis:", JSON.stringify(quotaDecrementError, null, 2));
+                    // Don't fail the request - analysis succeeded, but log the error
+                } else if (!quotaDecremented) {
+                    console.error("[Analyze-Image] Decrement returned false after successful analysis - quota may have been exhausted between check and decrement");
+                    // This could happen if quota was exhausted between the check and decrement
+                    // But don't fail the request since analysis succeeded
+                } else {
+                    console.log(`[Analyze-Image] Successfully decremented creation quota for user ${userId}`);
                 }
-            );
-
-            console.log(`[Analyze-Image] Decrement result:`, {
-                userId,
-                quotaDecremented,
-                error: quotaDecrementError,
-                errorMessage: quotaDecrementError?.message,
-                errorCode: quotaDecrementError?.code,
-            });
-
-            if (quotaDecrementError) {
-                console.error("[Analyze-Image] Decrement error after successful analysis:", JSON.stringify(quotaDecrementError, null, 2));
-                // Don't fail the request - analysis succeeded, but log the error
-            } else if (!quotaDecremented) {
-                console.error("[Analyze-Image] Decrement returned false after successful analysis - quota may have been exhausted between check and decrement");
-                // This could happen if quota was exhausted between the check and decrement
-                // But don't fail the request since analysis succeeded
             } else {
-                console.log(`[Analyze-Image] Successfully decremented creation quota for user ${userId}`);
+                // Unauthenticated users: track daily quota usage
+                console.log(`[Analyze-Image] Tracking daily quota usage for anonymous user (IP: ${identifier})`);
+                // Increment daily quota tracking (1440 minute window = 24 hours)
+                const dailyQuotaResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-daily",
+                    10,
+                    1440 // 24 hours in minutes
+                );
+                console.log(`[Analyze-Image] Daily quota tracked:`, {
+                    remaining: dailyQuotaResult.remaining,
+                    limit: dailyQuotaResult.limit,
+                    resetAt: dailyQuotaResult.resetAt.toISOString(),
+                });
             }
         }
 
