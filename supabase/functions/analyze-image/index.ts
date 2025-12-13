@@ -600,8 +600,10 @@ serve(async (req) => {
                 }
 
                 // Then check 15-minute window (5 requests) - abuse prevention
+                // IMPORTANT: Use readonly check here - we only increment AFTER successful analysis
+                // This prevents failed requests (502 errors, LLM failures) from counting against the limit
                 console.log(`[Analyze-Image] Checking 15-minute rate limit for unauthenticated user`);
-                const shortWindowResult = await checkRateLimit(
+                const shortWindowResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image-short",
@@ -640,11 +642,13 @@ serve(async (req) => {
             // Rate limits:
             // - Unauthenticated: 10 per hour (60 minutes)
             // - Authenticated: 50 per hour
+            // IMPORTANT: Use readonly check here - we only increment AFTER successful analysis
+            // This prevents failed requests (502 errors, LLM failures) from counting against the limit
             const hourlyLimit = userId ? 50 : 10;
             const hourlyWindow = 60;
 
             console.log(`[Analyze-Image] Checking hourly rate limit (limit: ${hourlyLimit}, window: ${hourlyWindow}min)`);
-            const hourlyResult = await checkRateLimit(
+            const hourlyResult = await checkRateLimitReadonly(
                 supabaseAdmin,
                 identifier,
                 "analyze-image",
@@ -710,13 +714,13 @@ serve(async (req) => {
 
         // Validate image
         if (!imageFile) {
-            // Get rate limit headers
+            // Get rate limit headers (readonly - don't increment for validation errors)
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -737,13 +741,13 @@ serve(async (req) => {
 
         // Validate content type
         if (!imageFile.type || !imageFile.type.startsWith("image/")) {
-            // Get rate limit headers
+            // Get rate limit headers (readonly - don't increment for validation errors)
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -765,13 +769,13 @@ serve(async (req) => {
         // Track request (after rate limit check passes) - non-blocking
         trackEvent("api_analyze_requested", { provider }, distinctId);
 
-        // Get rate limit headers for response (re-check to get current state)
+        // Get rate limit headers for response (readonly - we'll increment after success)
         let rateLimitHeaders: Record<string, string> = {};
         if (supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
             const identifier = getRateLimitIdentifier(req, userId);
             const hourlyLimit = userId ? 50 : 10;
-            const hourlyResult = await checkRateLimit(
+            const hourlyResult = await checkRateLimitReadonly(
                 supabaseAdmin,
                 identifier,
                 "analyze-image",
@@ -850,7 +854,7 @@ serve(async (req) => {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -885,7 +889,7 @@ serve(async (req) => {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -982,13 +986,13 @@ serve(async (req) => {
                 detail = `Vision model error: ${errorMessage}. Please try again with a different image or provider.`;
             }
 
-            // Get rate limit headers for error response
+            // Get rate limit headers for error response (readonly - don't increment for failed LLM calls)
             let rateLimitHeaders: Record<string, string> = {};
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -1024,13 +1028,13 @@ serve(async (req) => {
 
             trackEvent("api_analyze_error", { provider, error_type: "empty_response", model: model || "default" }, distinctId);
 
-            // Get rate limit headers
+            // Get rate limit headers (readonly - don't increment for failed LLM calls)
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -1078,13 +1082,13 @@ serve(async (req) => {
                 jsonTextLength: jsonText?.length || 0
             });
 
-            // Get rate limit headers
+            // Get rate limit headers (readonly - don't increment for parsing errors)
             let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -1146,13 +1150,13 @@ serve(async (req) => {
                 }
             }, distinctId);
 
-            // Get rate limit headers for error response
+            // Get rate limit headers for error response (readonly - don't increment for invalid data)
             let rateLimitHeaders: Record<string, string> = {};
             if (supabaseUrl && supabaseServiceRoleKey) {
                 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
@@ -1248,6 +1252,42 @@ serve(async (req) => {
                     resetAt: dailyQuotaResult.resetAt.toISOString(),
                 });
             }
+
+            // Track hourly rate limit usage AFTER successful analysis
+            // This is the ONLY place we increment hourly rate limit - failed requests don't count
+            const hourlyLimit = userId ? 50 : 10;
+            const hourlyResult = await checkRateLimit(
+                supabaseAdmin,
+                identifier,
+                "analyze-image",
+                hourlyLimit,
+                60 // 60 minutes
+            );
+            console.log(`[Analyze-Image] Hourly rate limit tracked after successful analysis:`, {
+                remaining: hourlyResult.remaining,
+                limit: hourlyResult.limit,
+                resetAt: hourlyResult.resetAt.toISOString(),
+            });
+
+            // Update rate limit headers with incremented values for response
+            rateLimitHeaders = getRateLimitHeaders(hourlyResult);
+
+            // Track 15-minute rate limit usage AFTER successful analysis (for unauthenticated users only)
+            // This is the ONLY place we increment 15-minute rate limit - failed requests don't count
+            if (!userId) {
+                const shortWindowResult = await checkRateLimit(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-short",
+                    5,
+                    15 // 15 minutes
+                );
+                console.log(`[Analyze-Image] 15-minute rate limit tracked after successful analysis:`, {
+                    remaining: shortWindowResult.remaining,
+                    limit: shortWindowResult.limit,
+                    resetAt: shortWindowResult.resetAt.toISOString(),
+                });
+            }
         }
 
         // Track success - non-blocking
@@ -1339,7 +1379,7 @@ serve(async (req) => {
             errorKeys: error ? Object.keys(error) : [],
         });
 
-        // Try to get rate limit headers even on error
+        // Try to get rate limit headers even on error (readonly - don't increment for top-level errors)
         let rateLimitHeaders: Record<string, string> = {} as Record<string, string>;
         try {
             const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -1362,7 +1402,7 @@ serve(async (req) => {
                 }
                 const identifier = getRateLimitIdentifier(req, userId);
                 const hourlyLimit = userId ? 50 : 10;
-                const hourlyResult = await checkRateLimit(
+                const hourlyResult = await checkRateLimitReadonly(
                     supabaseAdmin,
                     identifier,
                     "analyze-image",
