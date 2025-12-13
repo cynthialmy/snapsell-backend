@@ -43,6 +43,7 @@ import {
     getRateLimitHeaders,
     getRateLimitIdentifier,
     createRateLimitErrorResponse,
+    RateLimitResult,
 } from "../_shared/rate-limit.ts";
 
 // ============================================
@@ -1304,6 +1305,7 @@ Error: ${errorMessage}`;
         // Track quota usage AFTER successful analysis
         // For authenticated users: decrement creation quota
         // For unauthenticated users: track daily quota usage
+        let dailyQuotaResultAfterIncrement: RateLimitResult | null = null;
         if (supabaseUrl && supabaseServiceRoleKey) {
             const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
             const identifier = getRateLimitIdentifier(req, userId);
@@ -1353,7 +1355,7 @@ Error: ${errorMessage}`;
                 console.log(`[Analyze-Image] Tracking daily quota usage for anonymous user (IP: ${identifier})`);
                 // Increment daily quota tracking (1440 minute window = 24 hours)
                 // This is the ONLY place we increment daily quota for unauthenticated users
-                const dailyQuotaResult = await checkRateLimit(
+                dailyQuotaResultAfterIncrement = await checkRateLimit(
                     supabaseAdmin,
                     identifier,
                     "analyze-image-daily",
@@ -1361,9 +1363,9 @@ Error: ${errorMessage}`;
                     1440 // 24 hours in minutes
                 );
                 console.log(`[Analyze-Image] Daily quota tracked:`, {
-                    remaining: dailyQuotaResult.remaining,
-                    limit: dailyQuotaResult.limit,
-                    resetAt: dailyQuotaResult.resetAt.toISOString(),
+                    remaining: dailyQuotaResultAfterIncrement.remaining,
+                    limit: dailyQuotaResultAfterIncrement.limit,
+                    resetAt: dailyQuotaResultAfterIncrement.resetAt.toISOString(),
                 });
             }
 
@@ -1433,21 +1435,32 @@ Error: ${errorMessage}`;
             }
         } else if (supabaseUrl && supabaseServiceRoleKey) {
             // Unauthenticated users: get daily quota info
-            const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
-            const identifier = getRateLimitIdentifier(req, userId);
-            const dailyQuotaResult = await checkRateLimit(
-                supabaseAdmin,
-                identifier,
-                "analyze-image-daily",
-                10,
-                1440 // 24 hours in minutes
-            );
-            dailyQuotaInfo = {
-                remaining: dailyQuotaResult.remaining,
-                limit: dailyQuotaResult.limit,
-                resetAt: dailyQuotaResult.resetAt,
-            };
-            console.log(`[Analyze-Image] Daily quota info for unauthenticated user:`, dailyQuotaInfo);
+            // Reuse the result from the increment above to avoid double-counting
+            if (dailyQuotaResultAfterIncrement) {
+                dailyQuotaInfo = {
+                    remaining: dailyQuotaResultAfterIncrement.remaining,
+                    limit: dailyQuotaResultAfterIncrement.limit,
+                    resetAt: dailyQuotaResultAfterIncrement.resetAt,
+                };
+                console.log(`[Analyze-Image] Daily quota info for unauthenticated user (from increment result):`, dailyQuotaInfo);
+            } else {
+                // Fallback: read current state (shouldn't happen, but safe fallback)
+                const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+                const identifier = getRateLimitIdentifier(req, userId);
+                const dailyQuotaResult = await checkRateLimitReadonly(
+                    supabaseAdmin,
+                    identifier,
+                    "analyze-image-daily",
+                    10,
+                    1440 // 24 hours in minutes
+                );
+                dailyQuotaInfo = {
+                    remaining: dailyQuotaResult.remaining,
+                    limit: dailyQuotaResult.limit,
+                    resetAt: dailyQuotaResult.resetAt,
+                };
+                console.log(`[Analyze-Image] Daily quota info for unauthenticated user (fallback read):`, dailyQuotaInfo);
+            }
         }
 
         // Build response with listing and quota
