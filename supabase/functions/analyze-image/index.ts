@@ -73,7 +73,9 @@ const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL_DEPLOYMENT") || "gpt-4o";
 
 const AZURE_OPENAI_API_KEY = Deno.env.get("AZURE_OPENAI_API_KEY");
 const AZURE_OPENAI_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT");
-const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION") || "2024-05-01-preview";
+// GPT-5 models require API version 2025-08-07 or newer for Chat Completions
+// You can also set AZURE_OPENAI_API_VERSION environment variable to override this
+const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION") || "2025-08-07";
 const AZURE_OPENAI_MODEL = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "gpt-4o-ms";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
