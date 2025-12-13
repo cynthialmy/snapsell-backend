@@ -74,7 +74,7 @@ const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL_DEPLOYMENT") || "gpt-4o";
 const AZURE_OPENAI_API_KEY = Deno.env.get("AZURE_OPENAI_API_KEY");
 const AZURE_OPENAI_ENDPOINT = Deno.env.get("AZURE_OPENAI_ENDPOINT");
 const AZURE_OPENAI_API_VERSION = Deno.env.get("AZURE_OPENAI_API_VERSION") || "2024-05-01-preview";
-const AZURE_OPENAI_MODEL = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "gpt-5-mini";
+const AZURE_OPENAI_MODEL = Deno.env.get("AZURE_OPENAI_MODEL_DEPLOYMENT") || "gpt-4o-ms";
 
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
 const ANTHROPIC_MODEL = "claude-3-7-sonnet-20250219";
@@ -285,9 +285,39 @@ function createLLMClient(provider: LLMProvider, model?: string) {
             if (!AZURE_OPENAI_API_KEY || !AZURE_OPENAI_ENDPOINT) {
                 throw new Error("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT required");
             }
+            // For Azure OpenAI, the endpoint can be:
+            // 1. Full endpoint with /openai/v1/ (e.g., https://resource.openai.azure.com/openai/v1/)
+            // 2. Base resource URL (e.g., https://resource.openai.azure.com)
+            // We need to extract the base resource URL and construct: /openai/deployments/{deployment}
+            let azureEndpoint = AZURE_OPENAI_ENDPOINT.replace(/\/$/, "");
+
+            // Remove /openai/v1 or /openai/v1/ from the end if present
+            azureEndpoint = azureEndpoint.replace(/\/openai\/v1\/?$/, "");
+
+            // Remove /openai/deployments/... if already present
+            if (azureEndpoint.includes("/openai/deployments/")) {
+                azureEndpoint = azureEndpoint.split("/openai/deployments/")[0];
+            }
+
+            // Now we have the base resource URL (e.g., https://resource.openai.azure.com)
+            const baseResourceURL = azureEndpoint;
+            const deploymentName = model || AZURE_OPENAI_MODEL;
+
+            // Construct the full base URL: https://resource.openai.azure.com/openai/deployments/{deployment}
+            // The SDK will append /chat/completions automatically
+            const fullBaseURL = `${baseResourceURL}/openai/deployments/${deploymentName}`;
+
+            console.log(`[createLLMClient] Azure OpenAI configuration:`, {
+                originalEndpoint: AZURE_OPENAI_ENDPOINT,
+                baseResourceURL,
+                deploymentName,
+                fullBaseURL,
+                apiVersion: AZURE_OPENAI_API_VERSION,
+            });
+
             return new OpenAI({
                 apiKey: AZURE_OPENAI_API_KEY,
-                baseURL: `${AZURE_OPENAI_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${model || AZURE_OPENAI_MODEL}`,
+                baseURL: fullBaseURL,
                 defaultQuery: { "api-version": AZURE_OPENAI_API_VERSION },
             });
 
@@ -336,8 +366,26 @@ async function queryOpenAI(
     imageDataUrl: string,
     model: string
 ): Promise<string> {
+    // For Azure OpenAI, if the baseURL already includes the deployment path,
+    // we need to extract the deployment name from the baseURL and use it as the model
+    // This ensures the model parameter matches what's in the baseURL
+    let modelToUse = model;
+
+    // Check if this is an Azure OpenAI client (baseURL contains /openai/deployments/)
+    const clientBaseURL = (client as any).baseURL || "";
+    if (clientBaseURL.includes("/openai/deployments/")) {
+        // Extract deployment name from baseURL
+        const deploymentMatch = clientBaseURL.match(/\/openai\/deployments\/([^\/]+)/);
+        if (deploymentMatch && deploymentMatch[1]) {
+            modelToUse = deploymentMatch[1];
+            console.log(`[queryOpenAI] Azure OpenAI detected, using deployment from baseURL: ${modelToUse} (original model param: ${model})`);
+        } else {
+            console.log(`[queryOpenAI] Azure OpenAI detected but could not extract deployment name from baseURL: ${clientBaseURL}`);
+        }
+    }
+
     const completion = await client.chat.completions.create({
-        model,
+        model: modelToUse,
         messages: [
             {
                 role: "user",
@@ -953,7 +1001,10 @@ serve(async (req) => {
                     : errorMessage.toLowerCase().includes("api_key") ||
                         errorMessage.toLowerCase().includes("authentication")
                         ? "authentication"
-                        : "other";
+                        : errorMessage.toLowerCase().includes("resource not found") ||
+                            errorMessage.toLowerCase().includes("not found")
+                            ? "resource_not_found"
+                            : "other";
 
             trackEvent("api_analyze_error", { provider, error_type: errorType }, distinctId);
 
@@ -982,6 +1033,18 @@ serve(async (req) => {
             ) {
                 detail = `Rate limit exceeded for ${provider} API. Please try again later.`;
                 errorCode = "LLM_RATE_LIMIT";
+            } else if (
+                provider === "azure" &&
+                (errorMessage.toLowerCase().includes("resource not found") ||
+                    errorMessage.toLowerCase().includes("not found"))
+            ) {
+                detail = `Azure OpenAI deployment not found. Please verify that:
+1. The deployment name "${model || AZURE_OPENAI_MODEL}" exists in your Azure OpenAI resource
+2. The endpoint URL "${AZURE_OPENAI_ENDPOINT}" is correct
+3. The API version "${AZURE_OPENAI_API_VERSION}" is supported
+4. The deployment supports vision models (e.g., gpt-4o, gpt-4-turbo)
+Error: ${errorMessage}`;
+                errorCode = "AZURE_DEPLOYMENT_NOT_FOUND";
             } else {
                 detail = `Vision model error: ${errorMessage}. Please try again with a different image or provider.`;
             }
