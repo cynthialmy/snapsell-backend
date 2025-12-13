@@ -1,9 +1,7 @@
 -- ============================================
--- FUNCTION: Check Rate Limit (Read-Only)
+-- FIX: Check Rate Limit Readonly - Handle NULL values
 -- ============================================
--- Checks rate limit WITHOUT incrementing the counter
--- Use this for checking if a request would be allowed
--- Returns: allowed (boolean), remaining (integer), reset_at (timestamptz), current_count (integer)
+-- Fixes the issue where new IPs get null values instead of proper defaults
 CREATE OR REPLACE FUNCTION public.check_rate_limit_readonly(
   p_identifier text,
   p_endpoint text,

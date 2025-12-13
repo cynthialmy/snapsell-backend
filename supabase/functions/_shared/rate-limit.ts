@@ -59,8 +59,19 @@ export async function checkRateLimitReadonly(
   }
 
   const result = data?.[0];
+
+  // Log the raw result for debugging
+  console.log(`[checkRateLimitReadonly] Raw result:`, {
+    result: result,
+    hasResult: !!result,
+    allowed: result?.allowed,
+    remaining: result?.remaining,
+    current_count: result?.current_count,
+  });
+
   if (!result) {
     // If no result, allow the request (fail open)
+    console.log(`[checkRateLimitReadonly] No result returned, defaulting to allowed=true, remaining=${limit}`);
     const resetAt = new Date(Date.now() + windowMinutes * 60 * 1000);
     return {
       allowed: true,
@@ -78,6 +89,12 @@ export async function checkRateLimitReadonly(
   const remaining = result.remaining !== null && result.remaining !== undefined
     ? Number(result.remaining)
     : limit;
+
+  console.log(`[checkRateLimitReadonly] Processed result:`, {
+    allowed,
+    remaining,
+    current_count: result.current_count,
+  });
 
   return {
     allowed,
